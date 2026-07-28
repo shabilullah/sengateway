@@ -147,10 +147,25 @@ Staff and guests may share one captive SSID. Separate SSIDs may point to same `/
 
 No `.env` file is required. `deploy.sh` detects default-route IPv4, asks operator to confirm it, asks for portal hostname, and reads Cloudflare token without echoing it. Script generates app bootstrap secrets and stores all three secrets in Podman secret store.
 
+Default images are public multi-architecture GHCR packages:
+
+```text
+ghcr.io/shabilullah/sengateway:latest
+ghcr.io/shabilullah/sengateway-caddy:latest
+```
+
+Every push to `master` publishes `latest` and immutable `sha-<commit>` tags. Tags matching `vMAJOR.MINOR.PATCH` also publish semantic version tags. Images target `linux/amd64` and `linux/arm64` and include GitHub build provenance attestations.
+
 Run on Linux Podman host from repository root:
 
 ```sh
 ./deploy.sh
+```
+
+For source builds instead of GHCR images:
+
+```sh
+./deploy.sh --build
 ```
 
 Non-interactive automation may supply bootstrap values without writing them to disk:
@@ -217,10 +232,25 @@ podman logs sengateway-app
 
 SQLite state lives in Podman named `sengateway-app-data` volume. Back up volume before upgrades. Preserve `sengateway-encryption-key`; deleting or replacing it makes encrypted Google and UniFi credentials unreadable.
 
-Rebuild and replace containers while preserving volumes and secrets:
+Pull current `latest` images and replace containers while preserving volumes and secrets:
 
 ```sh
 ./deploy.sh
+```
+
+Pin deployment to immutable commit images when required:
+
+```sh
+APP_IMAGE=ghcr.io/shabilullah/sengateway:sha-<commit> \
+CADDY_IMAGE=ghcr.io/shabilullah/sengateway-caddy:sha-<commit> \
+./deploy.sh
+```
+
+Create a release tag to publish semantic image tags:
+
+```sh
+git tag v1.0.0
+git push origin v1.0.0
 ```
 
 Inspect failures:

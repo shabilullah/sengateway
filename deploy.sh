@@ -5,11 +5,12 @@ POD=${POD_NAME:-sengateway}
 RESOURCE_PREFIX=${RESOURCE_PREFIX:-$POD}
 APP_CONTAINER=${APP_CONTAINER_NAME:-sengateway-app}
 CADDY_CONTAINER=${CADDY_CONTAINER_NAME:-sengateway-caddy}
-APP_IMAGE=${APP_IMAGE:-localhost/sengateway-app:latest}
-CADDY_IMAGE=${CADDY_IMAGE:-localhost/sengateway-caddy:latest}
+APP_IMAGE=${APP_IMAGE:-ghcr.io/shabilullah/sengateway:latest}
+CADDY_IMAGE=${CADDY_IMAGE:-ghcr.io/shabilullah/sengateway-caddy:latest}
 HTTP_PORT=${HTTP_PORT:-80}
 HTTPS_PORT=${HTTPS_PORT:-443}
 APP_ONLY=false
+BUILD_IMAGES=false
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 APP_VOLUME=${APP_VOLUME:-${RESOURCE_PREFIX}-app-data}
 CADDY_DATA_VOLUME=${CADDY_DATA_VOLUME:-${RESOURCE_PREFIX}-caddy-data}
@@ -20,20 +21,23 @@ CLOUDFLARE_SECRET_NAME=${CLOUDFLARE_SECRET_NAME:-${RESOURCE_PREFIX}-cloudflare-t
 
 usage() {
     cat <<'EOF'
-Usage: ./deploy.sh [--app-only]
+Usage: ./deploy.sh [--build] [--app-only]
 
-Creates one Podman pod containing Sen Gateway and Caddy. Values may be supplied
-through PORTAL_HOSTNAME, ORIGIN_BIND_IP, and CLOUDFLARE_API_TOKEN; missing values
-are prompted. --app-only skips Caddy for local smoke tests.
+Creates one Podman pod containing Sen Gateway and Caddy. By default it pulls
+published GHCR images. --build builds images from this checkout. Values may be
+supplied through PORTAL_HOSTNAME, ORIGIN_BIND_IP, and CLOUDFLARE_API_TOKEN;
+missing values are prompted. --app-only skips Caddy for local smoke tests.
 EOF
 }
 
-case ${1:-} in
-    "") ;;
-    --app-only) APP_ONLY=true ;;
-    -h|--help) usage; exit 0 ;;
-    *) usage >&2; exit 2 ;;
-esac
+for option in "$@"; do
+    case $option in
+        --build) BUILD_IMAGES=true ;;
+        --app-only) APP_ONLY=true ;;
+        -h|--help) usage; exit 0 ;;
+        *) usage >&2; exit 2 ;;
+    esac
+done
 
 command -v podman >/dev/null 2>&1 || { echo "podman is required" >&2; exit 1; }
 command -v ip >/dev/null 2>&1 || { echo "iproute2 is required" >&2; exit 1; }
@@ -93,9 +97,16 @@ if [ "$APP_ONLY" = false ]; then
 fi
 unset CLOUDFLARE_API_TOKEN
 
-podman build -t "$APP_IMAGE" -f "$SCRIPT_DIR/Dockerfile" "$SCRIPT_DIR"
-if [ "$APP_ONLY" = false ]; then
-    podman build -t "$CADDY_IMAGE" -f "$SCRIPT_DIR/Dockerfile.caddy" "$SCRIPT_DIR"
+if [ "$BUILD_IMAGES" = true ]; then
+    podman build -t "$APP_IMAGE" -f "$SCRIPT_DIR/Dockerfile" "$SCRIPT_DIR"
+    if [ "$APP_ONLY" = false ]; then
+        podman build -t "$CADDY_IMAGE" -f "$SCRIPT_DIR/Dockerfile.caddy" "$SCRIPT_DIR"
+    fi
+else
+    podman pull "$APP_IMAGE"
+    if [ "$APP_ONLY" = false ]; then
+        podman pull "$CADDY_IMAGE"
+    fi
 fi
 
 ensure_volume() {
