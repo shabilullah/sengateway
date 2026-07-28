@@ -1,0 +1,54 @@
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    environment:
+      PUBLIC_BASE_URL: https://${PORTAL_HOSTNAME}
+      PORTAL_HOSTNAME: ${PORTAL_HOSTNAME}
+      DATABASE_URL: sqlite:/data/gateway.db?mode=rwc
+      SESSION_SECRET: ${SESSION_SECRET}
+      SETUP_ENCRYPTION_KEY: ${SETUP_ENCRYPTION_KEY}
+      COOKIE_SECURE: "true"
+      TRUSTED_PROXY_IP: ${TRUSTED_PROXY_IP:-172.28.0.3}
+    volumes:
+      - app-data:/data
+    expose:
+      - "8080"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks:
+      portal:
+        ipv4_address: 172.28.0.2
+  caddy:
+    build:
+      context: .
+      dockerfile: Dockerfile.caddy
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    environment:
+      PORTAL_HOSTNAME: ${PORTAL_HOSTNAME}
+      CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN}
+    ports:
+      - "${ORIGIN_BIND_IP}:80:80"
+      - "${ORIGIN_BIND_IP}:443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      portal:
+        ipv4_address: 172.28.0.3
+networks:
+  portal:
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
+volumes:
+  app-data:
+  caddy-data:
+  caddy-config:
