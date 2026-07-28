@@ -143,53 +143,47 @@ https://<PORTAL_HOSTNAME>/portal
 
 Staff and guests may share one captive SSID. Separate SSIDs may point to same `/portal` endpoint; authorization never trusts SSID for role.
 
-### 2. Configure and start Podman pod
+### 2. Configure and start with Compose
 
-No `.env` file is required. `deploy.sh` detects default-route IPv4, asks operator to confirm it, asks for portal hostname, and reads Cloudflare token without echoing it. Script generates app bootstrap secrets and stores all three secrets in Podman secret store.
-
-Default images are public multi-architecture GHCR packages:
+Deployment uses released multi-architecture GHCR images. No Rust toolchain or local image compilation is required:
 
 ```text
 ghcr.io/shabilullah/sengateway:latest
 ghcr.io/shabilullah/sengateway-caddy:latest
 ```
 
-Every push to `master` publishes `latest` and immutable `sha-<commit>` tags. Tags matching `vMAJOR.MINOR.PATCH` also publish semantic version tags. Images target `linux/amd64` and `linux/arm64` and include GitHub build provenance attestations.
-
-Run on Linux Podman host from repository root:
+Create deployment environment from template:
 
 ```sh
-./deploy.sh
+cp .env.example .env
 ```
 
-For source builds instead of GHCR images:
+Set `PORTAL_HOSTNAME`, concrete private LAN `ORIGIN_BIND_IP`, restricted Cloudflare token, and generated secrets in `.env`. Generate secrets with:
 
 ```sh
-./deploy.sh --build
+openssl rand -base64 48
+openssl rand -base64 32
 ```
 
-Non-interactive automation may supply bootstrap values without writing them to disk:
+First output becomes `SESSION_SECRET`. Second becomes `SETUP_ENCRYPTION_KEY` and must decode to exactly 32 bytes. Keep `.env` private; it contains credentials required to decrypt persisted settings and sign sessions.
+
+Pull released images and start services from repository root:
 
 ```sh
-PORTAL_HOSTNAME=portal.example.com \
-ORIGIN_BIND_IP=192.168.10.20 \
-CLOUDFLARE_API_TOKEN='<zone-restricted-token>' \
-./deploy.sh
+docker compose pull
+docker compose up -d
 ```
 
-Process environment can be inspected by privileged local users. Interactive token prompt is preferred. Token is removed from script environment after creation and passed only to Caddy as Podman secret.
+With Podman Compose, use equivalent commands:
 
-Script creates:
+```sh
+podman compose pull
+podman compose up -d
+```
 
-- Pod `sengateway`, owning host bindings on TCP/80 and TCP/443.
-- App container sharing pod network namespace and listening privately on `127.0.0.1:8080` from Caddy's perspective.
-- Caddy container proxying `127.0.0.1:8080` and performing Cloudflare DNS-01.
-- Named volumes `sengateway-app-data`, `sengateway-caddy-data`, and `sengateway-caddy-config`.
-- Podman secrets `sengateway-session-secret`, `sengateway-encryption-key`, and `sengateway-cloudflare-token`.
+Compose creates app, Caddy, private `portal` network, and persistent `app-data`, `caddy-data`, and `caddy-config` volumes. App port 8080 remains internal. Caddy binds only `ORIGIN_BIND_IP` on TCP/80 and TCP/443, performs Cloudflare DNS-01, and proxies app traffic.
 
-`ORIGIN_BIND_IP` must be concrete private LAN interface, never `0.0.0.0`. Rootful Podman is simplest because pod binds ports 80/443. For rootless Podman, configure privileged-port policy deliberately; do not remap production portal to alternate ports.
-
-Host firewall must allow TCP/80 and TCP/443 only from organization and guest LANs. Do not expose TCP/8080 or create WAN NAT forwarding. Port 80 exists only for HTTPS redirect; ACME uses DNS-01.
+`ORIGIN_BIND_IP` must be concrete private LAN interface, never `0.0.0.0`. Host firewall must allow TCP/80 and TCP/443 only from organization and guest LANs. Do not expose TCP/8080 or create WAN NAT forwarding. Port 80 exists only for HTTPS redirect; ACME uses DNS-01.
 
 If UniFi controller uses private CA, install CA certificate into app image trust store. Never disable TLS verification.
 
@@ -199,13 +193,12 @@ Expected startup:
 - App logs one setup URL.
 - Port 8080 has no host listener.
 
-Check status:
+Check status and obtain setup URL:
 
 ```sh
-podman pod ps
-podman ps --pod --filter pod=sengateway
-podman logs sengateway-app
-podman logs sengateway-caddy
+docker compose ps
+docker compose logs app
+docker compose logs caddy
 curl --fail https://<PORTAL_HOSTNAME>/healthz
 ```
 
@@ -221,41 +214,43 @@ From organization or guest LAN:
 4. Confirm portal is unreachable from Internet/off-site network.
 5. Confirm first coupon device authorizes, over-limit device is denied, and admin revoke unauthorizes client.
 6. Confirm second staff device replaces oldest device when staff limit is one.
-7. Restart pod and confirm setup does not reopen:
+7. Restart services and confirm setup does not reopen:
 
 ```sh
-podman pod restart sengateway
-podman logs sengateway-app
+docker compose restart
+docker compose logs app
 ```
 
 ### Updates and backups
 
-SQLite state lives in Podman named `sengateway-app-data` volume. Back up volume before upgrades. Preserve `sengateway-encryption-key`; deleting or replacing it makes encrypted Google and UniFi credentials unreadable.
+SQLite state lives in Compose `app-data` volume. Back up volume before upgrades. Preserve `SETUP_ENCRYPTION_KEY`; replacing it makes encrypted Google and UniFi credentials unreadable.
 
-Pull current `latest` images and replace containers while preserving volumes and secrets:
-
-```sh
-./deploy.sh
-```
-
-Pin deployment to immutable commit images when required:
+Pull current released images and replace containers while preserving volumes:
 
 ```sh
-APP_IMAGE=ghcr.io/shabilullah/sengateway:sha-<commit> \
-CADDY_IMAGE=ghcr.io/shabilullah/sengateway-caddy:sha-<commit> \
-./deploy.sh
+docker compose pull
+docker compose up -d
 ```
 
-Create a release tag to publish semantic image tags:
+Pin deployment to immutable commit images by setting these values in `.env`:
+
+```dotenv
+APP_IMAGE=ghcr.io/shabilullah/sengateway:sha-<commit>
+CADDY_IMAGE=ghcr.io/shabilullah/sengateway-caddy:sha-<commit>
+```
+
+Then apply pinned images:
 
 ```sh
-git tag v1.0.0
-git push origin v1.0.0
+docker compose pull
+docker compose up -d
 ```
+
+Tags matching `vMAJOR.MINOR.PATCH` publish semantic release images. Every push to `master` also publishes `latest` and immutable `sha-<commit>` tags for `linux/amd64` and `linux/arm64`.
 
 Inspect failures:
 
 ```sh
-podman logs --tail=200 sengateway-app
-podman logs --tail=200 sengateway-caddy
+docker compose logs --tail=200 app
+docker compose logs --tail=200 caddy
 ```

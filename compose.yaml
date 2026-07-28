@@ -1,6 +1,6 @@
 services:
   app:
-    build: .
+    image: ${APP_IMAGE:-ghcr.io/shabilullah/sengateway:latest}
     restart: unless-stopped
     environment:
       PUBLIC_BASE_URL: https://${PORTAL_HOSTNAME}
@@ -23,9 +23,7 @@ services:
       portal:
         ipv4_address: 172.28.0.2
   caddy:
-    build:
-      context: .
-      dockerfile: Dockerfile.caddy
+    image: ${CADDY_IMAGE:-ghcr.io/shabilullah/sengateway-caddy:latest}
     restart: unless-stopped
     depends_on:
       app:
