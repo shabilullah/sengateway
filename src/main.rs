@@ -59,6 +59,13 @@ struct SetupQuery {
     token: Option<String>,
 }
 #[derive(Deserialize)]
+struct HomeQuery {
+    id: Option<String>,
+    ap: Option<String>,
+    ssid: Option<String>,
+    url: Option<String>,
+}
+#[derive(Deserialize)]
 struct SetupForm {
     token: String,
     initial_admin_email: String,
@@ -130,6 +137,7 @@ async fn main() {
         .with_signed(key)
         .with_expiry(Expiry::OnInactivity(time::Duration::hours(8)));
     let app = Router::new()
+        .route("/", get(home))
         .route("/healthz", get(health))
         .route("/setup", get(setup_get).post(setup_post))
         .route("/portal", get(portal_get))
@@ -225,7 +233,23 @@ async fn css() -> impl IntoResponse {
 }
 fn page(title: &str, body: &str) -> Html<String> {
     Html(format!(
-        r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{title}</title><link rel="stylesheet" href="/static/app.css"></head><body><header><strong>Sen Gateway</strong></header><main>{body}</main></body></html>"#
+        r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{title}</title><link rel="stylesheet" href="/static/app.css"></head><body><header><a class="brand" href="/">SEN Gateway</a></header><main>{body}</main></body></html>"#
+    ))
+}
+
+fn landing(portal_ready: bool) -> Html<String> {
+    let staff_href = if portal_ready {
+        "/auth/google/start?intent=PORTAL"
+    } else {
+        "#staff-help"
+    };
+    let form = if portal_ready {
+        r#"<form method="post" action="/coupon/redeem"><label for="code">Voucher code</label><input id="code" required name="code" autocomplete="one-time-code" placeholder="XXXX-XXXX-XXXX"><button>Connect to internet</button></form>"#
+    } else {
+        r#"<form><label for="code">Voucher code</label><input id="code" disabled placeholder="XXXX-XXXX-XXXX"><button disabled>Connect to internet</button></form><p class="hint">Connect to guest Wi-Fi first. This page will reopen with your device details.</p>"#
+    };
+    Html(format!(
+        r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Internet access</title><link rel="stylesheet" href="/static/app.css"></head><body><header><a class="brand" href="/">SEN Gateway</a><nav><a href="{staff_href}">Staff login</a><a href="/auth/google/start?intent=MANAGEMENT">Admin login</a></nav></header><main class="landing"><section><p class="eyebrow">Guest Wi-Fi</p><h1>Connect with voucher</h1><p>Enter voucher provided by front desk.</p>{form}</section><aside id="staff-help" class="card"><h2>Staff access</h2><p>Staff must connect to guest Wi-Fi before signing in with Google Workspace.</p><a class="button secondary" href="{staff_href}">Staff login</a></aside></main></body></html>"#
     ))
 }
 async fn setup_get(
@@ -273,10 +297,7 @@ async fn setup_post(
         SecretString::from(f.unifi_api_key.clone()),
     )
     .map_err(|_| (StatusCode::BAD_REQUEST, "invalid UniFi settings"))?;
-    probe
-        .site_check()
-        .await
-        .map_err(|_| (StatusCode::BAD_GATEWAY, "UniFi site validation failed"))?;
+    probe.site_check().await.map_err(unifi_setup_error)?;
     let (gc, gn) = crypto::encrypt(
         &s.config.encryption_key,
         &SecretString::from(f.google_oauth_client_secret),
@@ -322,7 +343,7 @@ async fn portal_get(
         .insert("portal_context", ctx)
         .await
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "session failure"))?;
-    Ok(page("Internet access",r#"<section><h1>Internet access</h1><a href="/auth/google/start?intent=PORTAL">Staff — Sign in with Google</a><form method="post" action="/coupon/redeem"><label>Guest coupon<input required name="code" autocomplete="off"></label><button>Redeem coupon</button></form></section>"#).into_response())
+    Ok(landing(true).into_response())
 }
 #[derive(Deserialize)]
 struct CouponForm {
@@ -432,6 +453,31 @@ async fn load_unifi(s: &AppState) -> Result<unifi::UnifiClient, (StatusCode, &'s
     )
     .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "UniFi client failed"))
 }
+async fn home(
+    State(s): State<AppState>,
+    session: Session,
+    Query(q): Query<HomeQuery>,
+) -> WebResult {
+    if !*s.setup_done.read().await {
+        return Err((StatusCode::SERVICE_UNAVAILABLE, "setup required"));
+    }
+    let Some(id) = q.id else {
+        return Ok(landing(false).into_response());
+    };
+    let ctx = portal::PortalContext::try_from(portal::PortalQuery {
+        id,
+        ap: q.ap,
+        ssid: q.ssid,
+        url: q.url,
+    })
+    .map_err(|_| (StatusCode::BAD_REQUEST, "invalid portal request"))?;
+    session
+        .insert("portal_context", ctx)
+        .await
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "session failure"))?;
+    Ok(landing(true).into_response())
+}
+
 async fn fallback(State(s): State<AppState>) -> impl IntoResponse {
     if !*s.setup_done.read().await {
         (StatusCode::SERVICE_UNAVAILABLE, "setup required")
@@ -439,18 +485,50 @@ async fn fallback(State(s): State<AppState>) -> impl IntoResponse {
         (StatusCode::NOT_FOUND, "not found")
     }
 }
+fn unifi_setup_error(error: unifi::UnifiError) -> (StatusCode, &'static str) {
+    match error {
+        unifi::UnifiError::Http(StatusCode::UNAUTHORIZED) => {
+            (StatusCode::BAD_GATEWAY, "UniFi API key was rejected")
+        }
+        unifi::UnifiError::Http(StatusCode::FORBIDDEN) => {
+            (StatusCode::BAD_GATEWAY, "UniFi API key lacks site access")
+        }
+        unifi::UnifiError::Http(StatusCode::NOT_FOUND) => (
+            StatusCode::BAD_GATEWAY,
+            "UniFi API URL or site ID was not found",
+        ),
+        unifi::UnifiError::Http(_) => (
+            StatusCode::BAD_GATEWAY,
+            "UniFi API returned an unexpected response",
+        ),
+        unifi::UnifiError::Request => (
+            StatusCode::BAD_GATEWAY,
+            "Could not connect securely to UniFi",
+        ),
+        unifi::UnifiError::NotFound => (StatusCode::BAD_GATEWAY, "UniFi site was not found"),
+    }
+}
+
 fn validate_setup(f: &SetupForm) -> Result<(), (StatusCode, &'static str)> {
-    if f.google_oauth_version != "v2"
-        || f.google_workspace_domain != f.google_workspace_domain.to_lowercase()
-        || !f.initial_admin_email.contains('@')
-        || f.unifi_site_id.trim().is_empty()
-    {
-        return Err((StatusCode::BAD_REQUEST, "invalid setup values"));
+    if f.google_oauth_version != "v2" {
+        return Err((StatusCode::BAD_REQUEST, "Google OAuth version must be v2"));
+    }
+    if f.google_workspace_domain != f.google_workspace_domain.to_lowercase() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Workspace domain must be lowercase",
+        ));
+    }
+    if !f.initial_admin_email.contains('@') {
+        return Err((StatusCode::BAD_REQUEST, "Initial admin email is invalid"));
+    }
+    if f.unifi_site_id.trim().is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "UniFi site ID is required"));
     }
     let u = url::Url::parse(&f.unifi_network_api_url)
-        .map_err(|_| (StatusCode::BAD_REQUEST, "invalid UniFi URL"))?;
+        .map_err(|_| (StatusCode::BAD_REQUEST, "UniFi API URL is invalid"))?;
     if u.scheme() != "https" {
-        return Err((StatusCode::BAD_REQUEST, "UniFi URL must use HTTPS"));
+        return Err((StatusCode::BAD_REQUEST, "UniFi API URL must use HTTPS"));
     }
     Ok(())
 }
@@ -547,6 +625,39 @@ async fn reconcile(s: AppState) {
         }
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn setup_form() -> SetupForm {
+        SetupForm {
+            token: "token".into(),
+            initial_admin_email: "admin@example.com".into(),
+            google_auth_client_id: "client".into(),
+            google_oauth_client_secret: "secret".into(),
+            google_oauth_version: "v2".into(),
+            google_workspace_domain: "example.com".into(),
+            unifi_network_api_url: "https://unifi.example.com/integration/v1".into(),
+            unifi_api_key: "key".into(),
+            unifi_site_id: "site-id".into(),
+        }
+    }
+
+    #[test]
+    fn setup_validation_identifies_invalid_field() {
+        let mut form = setup_form();
+        assert!(validate_setup(&form).is_ok());
+        form.google_workspace_domain = "EXAMPLE.com".into();
+        assert_eq!(
+            validate_setup(&form),
+            Err((
+                StatusCode::BAD_REQUEST,
+                "Workspace domain must be lowercase"
+            ))
+        );
+    }
+}
+
 async fn shutdown() {
     let _ = tokio::signal::ctrl_c().await;
 }

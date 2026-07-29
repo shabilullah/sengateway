@@ -130,12 +130,7 @@ pub async fn callback(
     }
     let sub = claims.subject().as_str();
     let display = claims.name().and_then(|n| n.get(None)).map(|n| n.as_str());
-    let mut tx = s
-        .pool
-        .begin()
-        .await
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "database failure"))?;
-    let row=sqlx::query("SELECT id,google_sub,role,approved FROM users WHERE google_sub=? OR (google_sub IS NULL AND email=? COLLATE NOCASE) ORDER BY google_sub IS NOT NULL DESC LIMIT 1").bind(sub).bind(&email).fetch_optional(&mut *tx).await.map_err(|_|(StatusCode::INTERNAL_SERVER_ERROR,"database failure"))?;
+    let row=sqlx::query("SELECT id,google_sub,role,approved FROM users WHERE google_sub=? OR (google_sub IS NULL AND email=? COLLATE NOCASE) ORDER BY google_sub IS NOT NULL DESC LIMIT 1").bind(sub).bind(&email).fetch_optional(&s.pool).await.map_err(|e| { tracing::error!("login user lookup failed: {e}"); (StatusCode::INTERNAL_SERVER_ERROR,"database failure") })?;
     let Some(row) = row else {
         return deny(&s, None, "account not approved").await;
     };
@@ -151,6 +146,10 @@ pub async fn callback(
     {
         return deny(&s, Some(id), "role denied").await;
     }
+    let mut tx = s.pool.begin().await.map_err(|e| {
+        tracing::error!("login transaction failed: {e}");
+        (StatusCode::INTERNAL_SERVER_ERROR, "database failure")
+    })?;
     if existing.is_none() {
         let conflict: bool =
             sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE google_sub=? AND id<>?)")
@@ -160,6 +159,7 @@ pub async fn callback(
                 .await
                 .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "database failure"))?;
         if conflict {
+            tx.rollback().await.ok();
             return deny(&s, Some(id), "identity already bound").await;
         }
     }

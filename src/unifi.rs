@@ -1,7 +1,7 @@
 use reqwest::{Client, StatusCode};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
-use std::{sync::Arc, time::Duration};
+use std::{env, fs, sync::Arc, time::Duration};
 use thiserror::Error;
 use time::OffsetDateTime;
 use tokio::sync::RwLock;
@@ -32,6 +32,16 @@ struct Page {
     #[serde(default)]
     data: Vec<ClientRecord>,
 }
+#[derive(Deserialize)]
+struct SitesPage {
+    #[serde(default)]
+    data: Vec<SiteRecord>,
+}
+
+#[derive(Deserialize)]
+struct SiteRecord {
+    id: String,
+}
 #[derive(Serialize)]
 struct Action<'a> {
     action: &'a str,
@@ -50,10 +60,14 @@ pub enum UnifiError {
 
 impl UnifiClient {
     pub fn new(base: String, site: String, key: SecretString) -> Result<Self, UnifiError> {
-        let http = Client::builder()
-            .timeout(Duration::from_secs(10))
-            .build()
-            .map_err(|_| UnifiError::Request)?;
+        let mut builder = Client::builder().timeout(Duration::from_secs(10));
+        if let Some(path) = env::var_os("UNIFI_CA_CERT_PATH") {
+            let pem = fs::read(path).map_err(|_| UnifiError::Request)?;
+            let certificate =
+                reqwest::Certificate::from_pem(&pem).map_err(|_| UnifiError::Request)?;
+            builder = builder.add_root_certificate(certificate);
+        }
+        let http = builder.build().map_err(|_| UnifiError::Request)?;
         Ok(Self {
             http,
             base: base.trim_end_matches('/').into(),
@@ -69,14 +83,22 @@ impl UnifiClient {
     }
     pub async fn site_check(&self) -> Result<(), UnifiError> {
         let r = self
-            .request(
-                reqwest::Method::GET,
-                format!("{}/sites/{}", self.base, self.site),
-            )
+            .request(reqwest::Method::GET, format!("{}/sites", self.base))
             .send()
             .await
             .map_err(|_| UnifiError::Request)?;
-        self.accept(r).await.map(|_| ())
+        let sites: SitesPage = self
+            .accept(r)
+            .await?
+            .json()
+            .await
+            .map_err(|_| UnifiError::Request)?;
+        sites
+            .data
+            .iter()
+            .any(|site| site.id == self.site)
+            .then_some(())
+            .ok_or(UnifiError::NotFound)
     }
     pub async fn readiness_check(&self) -> Result<(), UnifiError> {
         let r = self
@@ -187,5 +209,35 @@ impl UnifiClient {
     }
     pub fn site(&self) -> &str {
         &self.site
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{header, method, path},
+    };
+
+    #[tokio::test]
+    async fn site_check_finds_site_in_list() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/sites"))
+            .and(header("X-API-Key", "key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{"id": "wanted-site"}, {"id": "other-site"}]
+            })))
+            .mount(&server)
+            .await;
+
+        let client = UnifiClient::new(
+            server.uri(),
+            "wanted-site".into(),
+            SecretString::from("key"),
+        )
+        .unwrap();
+        client.site_check().await.unwrap();
     }
 }
