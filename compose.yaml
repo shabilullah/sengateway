@@ -10,7 +10,7 @@ services:
       SENGATEWAY_SECRET_DIR: /data
       COOKIE_SECURE: "true"
       TRUSTED_PROXY_IP: ${PROXY_IPV4:-172.28.0.3}
-      RUST_LOG: ${RUST_LOG:-sengateway=info}
+      RUST_LOG: sengateway=info
     volumes:
       - app-data:/data
     expose:
@@ -44,12 +44,10 @@ services:
     ports:
       - "${ORIGIN_BIND_IP:?Set private LAN ORIGIN_BIND_IP}:80:80"
       - "${ORIGIN_BIND_IP:?Set private LAN ORIGIN_BIND_IP}:443:443"
-    configs:
-      - source: caddyfile
-        target: /etc/caddy/Caddyfile
     volumes:
       - caddy-data:/data
       - caddy-config:/config
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
     networks:
       portal:
         ipv4_address: ${PROXY_IPV4:-172.28.0.3}
@@ -58,21 +56,6 @@ services:
         max-size: "10m"
         max-file: "3"
 
-configs:
-  caddyfile:
-    content: |
-      ${PORTAL_HOSTNAME:?Set PORTAL_HOSTNAME} {
-        tls {
-          dns cloudflare {env.CLOUDFLARE_API_TOKEN}
-        }
-        encode zstd gzip
-        header {
-          Content-Security-Policy "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; form-action 'self' https://accounts.google.com; frame-ancestors 'none'; base-uri 'none'"
-          X-Content-Type-Options nosniff
-          Referrer-Policy no-referrer
-        }
-        reverse_proxy {env.CADDY_UPSTREAM}
-      }
 
 networks:
   portal:
