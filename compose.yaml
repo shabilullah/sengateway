@@ -1,15 +1,16 @@
 services:
   app:
     image: ${APP_IMAGE:-ghcr.io/shabilullah/sengateway:latest}
+    pull_policy: always
     restart: unless-stopped
+    init: true
     environment:
-      PUBLIC_BASE_URL: https://${PORTAL_HOSTNAME}
-      PORTAL_HOSTNAME: ${PORTAL_HOSTNAME}
-      DATABASE_URL: sqlite:/data/gateway.db?mode=rwc
-      SESSION_SECRET: ${SESSION_SECRET}
-      SETUP_ENCRYPTION_KEY: ${SETUP_ENCRYPTION_KEY}
+      PUBLIC_BASE_URL: "https://${PORTAL_HOSTNAME:?Set PORTAL_HOSTNAME}"
+      DATABASE_URL: "sqlite:/data/gateway.db?mode=rwc"
+      SENGATEWAY_SECRET_DIR: /data
       COOKIE_SECURE: "true"
-      TRUSTED_PROXY_IP: ${TRUSTED_PROXY_IP:-172.28.0.3}
+      TRUSTED_PROXY_IP: ${PROXY_IPV4:-172.28.0.3}
+      RUST_LOG: ${RUST_LOG:-sengateway=info}
     volumes:
       - app-data:/data
     expose:
@@ -19,33 +20,67 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+      start_period: 10s
     networks:
       portal:
-        ipv4_address: 172.28.0.2
+        ipv4_address: ${APP_IPV4:-172.28.0.2}
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   caddy:
     image: ${CADDY_IMAGE:-ghcr.io/shabilullah/sengateway-caddy:latest}
+    pull_policy: always
     restart: unless-stopped
+    init: true
     depends_on:
       app:
         condition: service_healthy
     environment:
-      PORTAL_HOSTNAME: ${PORTAL_HOSTNAME}
-      CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN}
+      PORTAL_HOSTNAME: ${PORTAL_HOSTNAME:?Set PORTAL_HOSTNAME}
+      CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN:?Set restricted Cloudflare DNS token}
+      CADDY_UPSTREAM: app:8080
     ports:
-      - "${ORIGIN_BIND_IP}:80:80"
-      - "${ORIGIN_BIND_IP}:443:443"
+      - "${ORIGIN_BIND_IP:?Set private LAN ORIGIN_BIND_IP}:80:80"
+      - "${ORIGIN_BIND_IP:?Set private LAN ORIGIN_BIND_IP}:443:443"
+    configs:
+      - source: caddyfile
+        target: /etc/caddy/Caddyfile
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
       - caddy-config:/config
     networks:
       portal:
-        ipv4_address: 172.28.0.3
+        ipv4_address: ${PROXY_IPV4:-172.28.0.3}
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+configs:
+  caddyfile:
+    content: |
+      ${PORTAL_HOSTNAME:?Set PORTAL_HOSTNAME} {
+        tls {
+          dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+        }
+        encode zstd gzip
+        header {
+          Content-Security-Policy "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; form-action 'self' https://accounts.google.com; frame-ancestors 'none'; base-uri 'none'"
+          X-Content-Type-Options nosniff
+          Referrer-Policy no-referrer
+        }
+        reverse_proxy {env.CADDY_UPSTREAM}
+      }
+
 networks:
   portal:
+    driver: bridge
     ipam:
       config:
-        - subnet: 172.28.0.0/24
+        - subnet: ${PORTAL_SUBNET:-172.28.0.0/24}
+
 volumes:
   app-data:
   caddy-data:

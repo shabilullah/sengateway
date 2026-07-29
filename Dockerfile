@@ -7,7 +7,7 @@ COPY static static
 RUN cargo build --release --locked
 
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl openssl && rm -rf /var/lib/apt/lists/*
 RUN mkdir /data && chown 65532:65532 /data
 COPY --from=build /src/target/release/sengateway /usr/local/bin/sengateway
 USER 65532:65532

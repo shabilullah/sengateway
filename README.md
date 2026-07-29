@@ -152,20 +152,16 @@ ghcr.io/shabilullah/sengateway:latest
 ghcr.io/shabilullah/sengateway-caddy:latest
 ```
 
-Create deployment environment from template:
+
+In Dockge, create stack, paste repository `compose.yaml`, then enter values from `.env.example` in stack environment. Outside Dockge, copy environment template:
 
 ```sh
 cp .env.example .env
 ```
 
-Set `PORTAL_HOSTNAME`, concrete private LAN `ORIGIN_BIND_IP`, restricted Cloudflare token, and generated secrets in `.env`. Generate secrets with:
+Required changes: `PORTAL_HOSTNAME`, private LAN `ORIGIN_BIND_IP`, and restricted Cloudflare token. Enter full UniFi Network API URL later in one-time WebUI setup; no UniFi hostname, IP, or CA path belongs in default Dockge environment.
 
-```sh
-openssl rand -base64 48
-openssl rand -base64 32
-```
-
-First output becomes `SESSION_SECRET`. Second becomes `SETUP_ENCRYPTION_KEY` and must decode to exactly 32 bytes. Keep `.env` private; it contains credentials required to decrypt persisted settings and sign sessions.
+App generates session and setup-encryption secrets on first startup and stores them as mode `0600` files in persistent `app-data` volume beside SQLite data. Later starts reuse same values. No secret generation or Dockge environment entry is required.
 
 Pull released images and start services from repository root:
 
@@ -185,7 +181,7 @@ Compose creates app, Caddy, private `portal` network, and persistent `app-data`,
 
 `ORIGIN_BIND_IP` must be concrete private LAN interface, never `0.0.0.0`. Host firewall must allow TCP/80 and TCP/443 only from organization and guest LANs. Do not expose TCP/8080 or create WAN NAT forwarding. Port 80 exists only for HTTPS redirect; ACME uses DNS-01.
 
-If UniFi controller uses private CA, install CA certificate into app image trust store. Never disable TLS verification.
+UniFi URL hostname must resolve from app container and match certificate SAN. Setup leaves **Trust certificate currently presented by this UniFi server** disabled by default and uses normal OS CA verification. For confirmed self-signed UniFi such as `unifi.local`, enable checkbox; gateway captures certificate before sending API key, then pins and persists it only after strict hostname and API verification succeed. Otherwise configure UniFi OS with trusted CA certificate. Never accept certificate before independently confirming URL reaches intended controller.
 
 Expected startup:
 
@@ -223,7 +219,7 @@ docker compose logs app
 
 ### Updates and backups
 
-SQLite state lives in Compose `app-data` volume. Back up volume before upgrades. Preserve `SETUP_ENCRYPTION_KEY`; replacing it makes encrypted Google and UniFi credentials unreadable.
+SQLite state and generated runtime secrets live in Compose `app-data` volume. Back up and restore entire volume together. Losing `.setup-encryption-key` makes encrypted Google and UniFi credentials unreadable; generating a replacement does not recover them.
 
 Pull current released images and replace containers while preserving volumes:
 

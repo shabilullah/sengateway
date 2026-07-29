@@ -1,7 +1,12 @@
 use reqwest::{Client, StatusCode};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
-use std::{env, fs, sync::Arc, time::Duration};
+use std::{
+    env, fs,
+    process::{Command, Stdio},
+    sync::Arc,
+    time::Duration,
+};
 use thiserror::Error;
 use time::OffsetDateTime;
 use tokio::sync::RwLock;
@@ -59,12 +64,20 @@ pub enum UnifiError {
 }
 
 impl UnifiClient {
-    pub fn new(base: String, site: String, key: SecretString) -> Result<Self, UnifiError> {
+    pub fn new(
+        base: String,
+        site: String,
+        key: SecretString,
+        pinned_certificate_pem: Option<&[u8]>,
+    ) -> Result<Self, UnifiError> {
         let mut builder = Client::builder().timeout(Duration::from_secs(10));
-        if let Some(path) = env::var_os("UNIFI_CA_CERT_PATH") {
-            let pem = fs::read(path).map_err(|_| UnifiError::Request)?;
+        let configured = env::var_os("UNIFI_CA_CERT_PATH")
+            .map(fs::read)
+            .transpose()
+            .map_err(|_| UnifiError::Request)?;
+        if let Some(pem) = pinned_certificate_pem.or(configured.as_deref()) {
             let certificate =
-                reqwest::Certificate::from_pem(&pem).map_err(|_| UnifiError::Request)?;
+                reqwest::Certificate::from_pem(pem).map_err(|_| UnifiError::Request)?;
             builder = builder.add_root_certificate(certificate);
         }
         let http = builder.build().map_err(|_| UnifiError::Request)?;
@@ -76,6 +89,38 @@ impl UnifiClient {
             last_success: Arc::new(RwLock::new(None)),
         })
     }
+    pub fn capture_certificate(base: &str) -> Result<Vec<u8>, UnifiError> {
+        let url = reqwest::Url::parse(base).map_err(|_| UnifiError::Request)?;
+        if url.scheme() != "https" {
+            return Err(UnifiError::Request);
+        }
+        let host = url.host_str().ok_or(UnifiError::Request)?;
+        let port = url.port_or_known_default().ok_or(UnifiError::Request)?;
+        let output = Command::new("timeout")
+            .args([
+                "12s",
+                "openssl",
+                "s_client",
+                "-connect",
+                &format!("{host}:{port}"),
+                "-servername",
+                host,
+                "-showcerts",
+            ])
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|_| UnifiError::Request)?;
+        let stdout = String::from_utf8(output.stdout).map_err(|_| UnifiError::Request)?;
+        let begin = stdout
+            .find("-----BEGIN CERTIFICATE-----")
+            .ok_or(UnifiError::Request)?;
+        let relative_end = stdout[begin..]
+            .find("-----END CERTIFICATE-----")
+            .ok_or(UnifiError::Request)?;
+        let end = begin + relative_end + "-----END CERTIFICATE-----".len();
+        Ok(format!("{}\n", &stdout[begin..end]).into_bytes())
+    }
+
     fn request(&self, method: reqwest::Method, url: String) -> reqwest::RequestBuilder {
         self.http
             .request(method, url)
@@ -236,6 +281,7 @@ mod tests {
             server.uri(),
             "wanted-site".into(),
             SecretString::from("key"),
+            None,
         )
         .unwrap();
         client.site_check().await.unwrap();

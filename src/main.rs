@@ -75,6 +75,8 @@ struct SetupForm {
     google_workspace_domain: String,
     unifi_network_api_url: String,
     unifi_api_key: String,
+    #[serde(default)]
+    trust_unifi_self_signed_certificate: bool,
     unifi_site_id: String,
 }
 
@@ -272,7 +274,7 @@ async fn setup_get(
     if !check_token(&s, &token, peer.ip()).await {
         return Err((StatusCode::UNAUTHORIZED, "invalid or expired setup token"));
     }
-    Ok(page("Setup",&format!(r#"<section><h1>Initial setup</h1><form method="post"><input type="hidden" name="token" value="{}"><label>Initial admin email<input required type="email" name="initial_admin_email"></label><label>Google client ID<input required name="google_auth_client_id"></label><label>Google client secret<input required type="password" name="google_oauth_client_secret"></label><label>Google OAuth version<input required name="google_oauth_version" value="v2"></label><label>Workspace domain<input required name="google_workspace_domain"></label><label>UniFi Network API URL<input required type="url" name="unifi_network_api_url"></label><label>UniFi API key<input required type="password" name="unifi_api_key"></label><label>UniFi site ID<input required name="unifi_site_id"></label><button>Complete setup</button></form></section>"#,html(&token))).into_response())
+    Ok(page("Setup",&format!(r#"<section><h1>Initial setup</h1><form method="post"><input type="hidden" name="token" value="{}"><label>Initial admin email<input required type="email" name="initial_admin_email"></label><label>Google client ID<input required name="google_auth_client_id"></label><label>Google client secret<input required type="password" name="google_oauth_client_secret"></label><label>Google OAuth version<input required name="google_oauth_version" value="v2"></label><label>Workspace domain<input required name="google_workspace_domain"></label><label>UniFi Network API URL<input required type="url" name="unifi_network_api_url" placeholder="https://unifi.local:11443/proxy/network/integration/v1"></label><label class="check"><input type="checkbox" name="trust_unifi_self_signed_certificate" value="true"> Trust certificate currently presented by this UniFi server</label><p class="hint">Enable only after independently confirming this URL reaches your UniFi server. Leave disabled when UniFi uses a certificate trusted by the operating system.</p><label>UniFi API key<input required type="password" name="unifi_api_key"></label><label>UniFi site ID<input required name="unifi_site_id"></label><button>Complete setup</button></form></section>"#,html(&token))).into_response())
 }
 async fn setup_post(
     State(s): State<AppState>,
@@ -291,10 +293,19 @@ async fn setup_post(
         return Err((StatusCode::UNAUTHORIZED, "invalid or expired setup token"));
     }
     validate_setup(&f)?;
+    let unifi_certificate = if f.trust_unifi_self_signed_certificate {
+        Some(
+            unifi::UnifiClient::capture_certificate(&f.unifi_network_api_url)
+                .map_err(|_| (StatusCode::BAD_REQUEST, "cannot read UniFi TLS certificate"))?,
+        )
+    } else {
+        None
+    };
     let probe = unifi::UnifiClient::new(
         f.unifi_network_api_url.clone(),
         f.unifi_site_id.clone(),
         SecretString::from(f.unifi_api_key.clone()),
+        unifi_certificate.as_deref(),
     )
     .map_err(|_| (StatusCode::BAD_REQUEST, "invalid UniFi settings"))?;
     probe.site_check().await.map_err(unifi_setup_error)?;
@@ -310,7 +321,7 @@ async fn setup_post(
     .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "encryption failed"))?;
     let now = OffsetDateTime::now_utc().unix_timestamp();
     let mut tx = s.pool.begin().await.map_err(internal)?;
-    sqlx::query("INSERT INTO settings(id,public_base_url,google_client_id,google_client_secret_ciphertext,google_client_secret_nonce,google_oauth_version,google_workspace_domain,unifi_network_api_url,unifi_api_key_ciphertext,unifi_api_key_nonce,unifi_site_id,staff_session_minutes,setup_completed_at) VALUES(1,?,?,?,?,?,?,?,?,?,?,480,?)").bind(s.config.public_base_url.as_str()).bind(f.google_auth_client_id.trim()).bind(gc).bind(gn.as_slice()).bind("v2").bind(f.google_workspace_domain.trim()).bind(f.unifi_network_api_url.trim_end_matches('/')).bind(uc).bind(un.as_slice()).bind(f.unifi_site_id.trim()).bind(now).execute(&mut *tx).await.map_err(internal)?;
+    sqlx::query("INSERT INTO settings(id,public_base_url,google_client_id,google_client_secret_ciphertext,google_client_secret_nonce,google_oauth_version,google_workspace_domain,unifi_network_api_url,unifi_api_key_ciphertext,unifi_api_key_nonce,unifi_site_id,staff_session_minutes,setup_completed_at,unifi_certificate_pem) VALUES(1,?,?,?,?,?,?,?,?,?,?,480,?,?)").bind(s.config.public_base_url.as_str()).bind(f.google_auth_client_id.trim()).bind(gc).bind(gn.as_slice()).bind("v2").bind(f.google_workspace_domain.trim()).bind(f.unifi_network_api_url.trim_end_matches('/')).bind(uc).bind(un.as_slice()).bind(f.unifi_site_id.trim()).bind(now).bind(unifi_certificate).execute(&mut *tx).await.map_err(internal)?;
     sqlx::query("INSERT INTO users(email,role,approved,device_limit,created_at,updated_at) VALUES(?,'ADMIN',1,1,?,?)").bind(f.initial_admin_email.trim().to_lowercase()).bind(now).bind(now).execute(&mut *tx).await.map_err(internal)?;
     audit(&mut tx, None, "SETUP_COMPLETED", "SETTINGS", Some(1), "{}")
         .await
@@ -434,7 +445,7 @@ async fn diagnostics(State(s): State<AppState>, session: Session) -> WebResult {
 }
 async fn load_unifi(s: &AppState) -> Result<unifi::UnifiClient, (StatusCode, &'static str)> {
     use secrecy::ExposeSecret;
-    let row=sqlx::query("SELECT unifi_network_api_url,unifi_api_key_ciphertext,unifi_api_key_nonce,unifi_site_id FROM settings WHERE id=1").fetch_one(&s.pool).await.map_err(internal)?;
+    let row=sqlx::query("SELECT unifi_network_api_url,unifi_api_key_ciphertext,unifi_api_key_nonce,unifi_site_id,unifi_certificate_pem FROM settings WHERE id=1").fetch_one(&s.pool).await.map_err(internal)?;
     let secret = crypto::decrypt(
         &s.config.encryption_key,
         sqlx::Row::get(&row, "unifi_api_key_ciphertext"),
@@ -446,10 +457,12 @@ async fn load_unifi(s: &AppState) -> Result<unifi::UnifiClient, (StatusCode, &'s
             "credential decryption failed",
         )
     })?;
+    let certificate: Option<Vec<u8>> = sqlx::Row::get(&row, "unifi_certificate_pem");
     unifi::UnifiClient::new(
         sqlx::Row::get(&row, "unifi_network_api_url"),
         sqlx::Row::get(&row, "unifi_site_id"),
         SecretString::from(secret.expose_secret().to_owned()),
+        certificate.as_deref(),
     )
     .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "UniFi client failed"))
 }
@@ -625,6 +638,10 @@ async fn reconcile(s: AppState) {
         }
     }
 }
+async fn shutdown() {
+    let _ = tokio::signal::ctrl_c().await;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -639,6 +656,7 @@ mod tests {
             google_workspace_domain: "example.com".into(),
             unifi_network_api_url: "https://unifi.example.com/integration/v1".into(),
             unifi_api_key: "key".into(),
+            trust_unifi_self_signed_certificate: false,
             unifi_site_id: "site-id".into(),
         }
     }
@@ -656,8 +674,4 @@ mod tests {
             ))
         );
     }
-}
-
-async fn shutdown() {
-    let _ = tokio::signal::ctrl_c().await;
 }

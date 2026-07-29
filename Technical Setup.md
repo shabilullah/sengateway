@@ -201,28 +201,23 @@ DNS:<UNIFI_HOSTNAME>
 
 If missing, create/install controller certificate containing that SAN before continuing. Do not disable certificate verification.
 
-#### 2. Export trusted certificate
+#### 2. Choose trust mode during setup
 
-If controller uses private or self-signed certificate, export trusted PEM chain to deployment host:
+Setup offers **Trust certificate currently presented by this UniFi server**.
+
+- Leave disabled when UniFi OS has certificate trusted by standard OS CA store. Gateway performs normal CA and hostname verification.
+- Enable only for confirmed self-signed UniFi endpoint such as `unifi.local`. Gateway first captures presented certificate without sending API key, then creates strict TLS client pinned to that certificate. Setup saves pin only after hostname/SAN validation and official site API check succeed.
+
+Before enabling, independently compare certificate shown by UniFi administrator interface or from deployment host:
 
 ```sh
-sudo install -d -m 0755 /opt/sengateway
 openssl s_client \
   -connect <UNIFI_IPV4>:<UNIFI_PORT> \
-  -servername <UNIFI_HOSTNAME> \
-  -showcerts </dev/null 2>/dev/null \
-  | openssl x509 -outform PEM \
-  | sudo tee /opt/sengateway/unifi-ca.pem >/dev/null
-sudo chmod 0644 /opt/sengateway/unifi-ca.pem
+  -servername <UNIFI_HOSTNAME> </dev/null 2>/dev/null \
+  | openssl x509 -noout -fingerprint -sha256 -subject -issuer -ext subjectAltName
 ```
 
-For CA-issued controller certificate, use CA root/intermediate PEM supplied by administrator instead of copying leaf certificate. Leaf export above is suitable only when controller certificate itself is self-signed and trusted as root.
-
-Verify saved PEM:
-
-```sh
-openssl x509 -in /opt/sengateway/unifi-ca.pem -noout -subject -issuer -dates
-```
+Do not enable based only on certificate captured across untrusted network. Alternative: configure UniFi OS with certificate from trusted CA and leave checkbox disabled.
 
 #### 3. Provide hostname inside container
 
@@ -238,48 +233,18 @@ podman pod create \
   --publish <PORTAL_IPV4>:443:443
 ```
 
-For Compose, add to `app` service:
-
-```yaml
-services:
-  app:
-    extra_hosts:
-      - "<UNIFI_HOSTNAME>:<UNIFI_IPV4>"
-```
-
-Do not add mapping when normal DNS already supplies correct address.
-
-#### 4. Mount CA and enable app trust
-
-Podman app container options:
-
-```sh
---volume /opt/sengateway/unifi-ca.pem:/run/secrets/unifi-ca.pem:ro \
---env UNIFI_CA_CERT_PATH=/run/secrets/unifi-ca.pem
-```
-
-Compose app service:
-
-```yaml
-services:
-  app:
-    environment:
-      UNIFI_CA_CERT_PATH: /run/secrets/unifi-ca.pem
-    volumes:
-      - /opt/sengateway/unifi-ca.pem:/run/secrets/unifi-ca.pem:ro
-```
-
-Then configure gateway:
+Default Compose/Dockge stack needs no UniFi hostname or IP variable. During one-time WebUI setup, enter full API URL whose hostname resolves from container and matches controller certificate SAN:
 
 ```text
-UniFi Network API URL:
-https://<UNIFI_HOSTNAME>:<UNIFI_PORT>/proxy/network/integration/v1
+https://unifi.example.com:443/proxy/network/integration/v1
 ```
 
-Current `deploy.sh` and `compose.yaml` templates do not infer private hostname or CA. Add options above to local deployment configuration when controller does not use publicly trusted DNS/certificate.
+Publicly trusted certificate uses image OS CA store automatically.
 
-Gateway loads PEM from `UNIFI_CA_CERT_PATH` into HTTP client trust store. Never disable TLS verification. Gateway uses official `AUTHORIZE_GUEST_ACCESS` and `UNAUTHORIZE_GUEST_ACCESS` actions; do not use legacy `/api/s/{site}/cmd/stamgr` endpoints.
+#### 4. Optional administrator-supplied CA
 
+Certificate checkbox is portable default for verified self-signed UniFi. Administrator-supplied private CA remains optional deployment override through `UNIFI_CA_CERT_PATH`; see app runtime configuration when centralized CA management is required.
+Default `compose.yaml` needs no CA file. Setup persists optional pinned certificate in SQLite after explicit consent and successful strict verification. Gateway never disables TLS verification. It uses official `AUTHORIZE_GUEST_ACCESS` and `UNAUTHORIZE_GUEST_ACCESS` actions; do not use legacy `/api/s/{site}/cmd/stamgr` endpoints.
 ## Operations
 
 ### Health
