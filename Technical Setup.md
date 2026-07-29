@@ -178,6 +178,8 @@ services:
       SENGATEWAY_SECRET_DIR: /data
       COOKIE_SECURE: "true"
       TRUSTED_PROXY_IP: 172.28.0.3
+      SETUP: ${SETUP:?Set SETUP true or false}
+      SETUP_PASSCODE: ${SETUP_PASSCODE:?Set setup passcode with at least 16 bytes}
       RUST_LOG: sengateway=info
     volumes:
       - app-data:/data
@@ -255,15 +257,17 @@ volumes:
 
 ### 2. Set stack environment
 
-In Dockge stack **Environment**, add exactly these deployment values:
+In Dockge stack **Environment**, add these deployment values:
 
 ```dotenv
 PORTAL_HOSTNAME=<PORTAL_HOSTNAME>
 ORIGIN_BIND_IP=<PORTAL_IPV4>
 CLOUDFLARE_API_TOKEN=<RESTRICTED_CLOUDFLARE_DNS_TOKEN>
+SETUP=true
+SETUP_PASSCODE=<SETUP_PASSCODE>
 ```
 
-`CLOUDFLARE_API_TOKEN` must be a Cloudflare API token restricted to DNS edit access for portal zone. Do not use Global API Key. Do not add quotes around values.
+`CLOUDFLARE_API_TOKEN` must be a Cloudflare API token restricted to DNS edit access for portal zone. `SETUP_PASSCODE` must be a random value containing at least 16 bytes. Do not use Global API Key. Do not add quotes around values.
 
 Internal subnet `172.28.0.0/24` must be unused on deployment host. If it conflicts, change all four values together before deployment: subnet `172.28.0.0/24`, app address `172.28.0.2`, proxy address `172.28.0.3`, and `TRUSTED_PROXY_IP` `172.28.0.3`.
 
@@ -271,11 +275,13 @@ Internal subnet `172.28.0.0/24` must be unused on deployment host. If it conflic
 
 1. Select **Deploy** in Dockge.
 2. Wait until `app` reports `healthy` and `caddy` remains running.
-3. Open Dockge log for `app`. Copy one-time URL beginning `https://<PORTAL_HOSTNAME>/setup?token=`.
-4. Open URL from trusted on-site network before its ten-minute expiry.
-5. Enter initial administrator, Google OAuth, Workspace, and UniFi API values.
-6. For independently verified self-signed UniFi certificate, enable **Trust certificate currently presented by this UniFi server**. Leave disabled for publicly trusted certificate.
-7. Submit setup. Successful setup redirects to Google management login.
+3. Open `https://<PORTAL_HOSTNAME>/setup` from trusted on-site network.
+4. Enter `SETUP_PASSCODE`, administrator email, Google OAuth, Workspace, and UniFi API values.
+5. For independently verified self-signed UniFi certificate, enable **Trust certificate currently presented by this UniFi server**. Leave disabled for publicly trusted certificate.
+6. Submit setup. Successful setup redirects to Google management login.
+7. In Dockge Environment, set `SETUP=false`, then redeploy. `/setup` now returns `404`.
+
+To reconfigure later without deleting data, set `SETUP=true`, redeploy, open `/setup`, save settings with same passcode, then restore `SETUP=false` and redeploy. Reconfiguration preserves users, coupons, authorizations, sessions, and audit history.
 
 App creates `.session-secret`, `.setup-encryption-key`, and SQLite database inside persistent `app-data` volume. Caddy stores ACME account and certificate state in `caddy-data`. Redeploying same Dockge stack preserves these volumes. Deleting stack volumes destroys gateway configuration, coupons, sessions, audit history, certificate pin, and generated secrets.
 
@@ -440,6 +446,6 @@ User must exist in gateway management, be approved, and have role matching inten
 - Confirm **HTTPS Redirection Support** off.
 - Confirm hostname resolves to `<PORTAL_IPV4>` and Caddy serves valid certificate.
 
-### Setup is already complete
+### Setup returns 404
 
-`/setup` returns `404` after one-time setup commits. This is expected. Use management login instead. Never delete database to reopen setup.
+`/setup` exists only while app environment has `SETUP=true`. Temporarily enable it in Dockge and redeploy, reconfigure with `SETUP_PASSCODE`, then restore `SETUP=false` and redeploy. Never delete database merely to reopen setup.

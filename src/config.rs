@@ -2,6 +2,7 @@ use std::{env, fs, net::IpAddr, path::Path};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rand::RngCore;
+use sha2::Digest as _;
 use thiserror::Error;
 use url::Url;
 
@@ -13,6 +14,8 @@ pub struct Config {
     pub encryption_key: [u8; 32],
     pub cookie_secure: bool,
     pub trusted_proxy_ip: IpAddr,
+    pub setup_enabled: bool,
+    pub setup_passcode_hash: [u8; 32],
 }
 
 #[derive(Debug, Error)]
@@ -92,6 +95,17 @@ fn persistent_secret(
     }
 }
 
+fn boolean(name: &str, errors: &mut Vec<String>) -> Option<bool> {
+    match env::var(name).as_deref() {
+        Ok("true") => Some(true),
+        Ok("false") => Some(false),
+        _ => {
+            errors.push(format!("{name} must be true or false"));
+            None
+        }
+    }
+}
+
 impl Config {
     pub fn load() -> Result<Self, ConfigError> {
         let mut errors = Vec::new();
@@ -150,6 +164,15 @@ impl Config {
                 None
             }
         });
+        let setup_enabled = boolean("SETUP", &mut errors);
+        let setup_passcode_hash = get("SETUP_PASSCODE", &mut errors).and_then(|value| {
+            if value.len() >= 16 {
+                Some(sha2::Sha256::digest(value.as_bytes()).into())
+            } else {
+                errors.push("SETUP_PASSCODE must contain at least 16 bytes".into());
+                None
+            }
+        });
         if errors.is_empty() {
             Ok(Self {
                 public_base_url: public_base_url.unwrap(),
@@ -158,6 +181,8 @@ impl Config {
                 encryption_key: encryption_key.unwrap(),
                 cookie_secure: cookie_secure.unwrap(),
                 trusted_proxy_ip: trusted_proxy_ip.unwrap(),
+                setup_enabled: setup_enabled.unwrap(),
+                setup_passcode_hash: setup_passcode_hash.unwrap(),
             })
         } else {
             Err(ConfigError(errors.join("; ")))

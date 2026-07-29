@@ -10,6 +10,8 @@ services:
       SENGATEWAY_SECRET_DIR: /data
       COOKIE_SECURE: "true"
       TRUSTED_PROXY_IP: 172.28.0.3
+      SETUP: ${SETUP:?Set SETUP true or false}
+      SETUP_PASSCODE: ${SETUP_PASSCODE:?Set setup passcode with at least 16 bytes}
       RUST_LOG: sengateway=info
     volumes:
       - app-data:/data

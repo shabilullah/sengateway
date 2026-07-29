@@ -43,6 +43,8 @@ export SESSION_SECRET='<first-generated-value>'
 export SETUP_ENCRYPTION_KEY='<second-generated-value>'
 export COOKIE_SECURE=true
 export TRUSTED_PROXY_IP=127.0.0.1
+export SETUP=true
+export SETUP_PASSCODE='<random-at-least-16-byte-value>'
 export RUST_LOG=sengateway=info
 ```
 
@@ -56,6 +58,8 @@ $env:SESSION_SECRET = '<first-generated-value>'
 $env:SETUP_ENCRYPTION_KEY = '<second-generated-value>'
 $env:COOKIE_SECURE = 'true'
 $env:TRUSTED_PROXY_IP = '127.0.0.1'
+$env:SETUP = 'true'
+$env:SETUP_PASSCODE = '<random-at-least-16-byte-value>'
 $env:RUST_LOG = 'sengateway=info'
 ```
 
@@ -67,7 +71,7 @@ $env:RUST_LOG = 'sengateway=info'
 cargo run
 ```
 
-App listens on `0.0.0.0:8080`, applies embedded migrations, and prints one setup URL when database has no completed setup record.
+App listens on `0.0.0.0:8080`, applies embedded migrations, and exposes `/setup` while `SETUP=true`.
 
 In another terminal, start local HTTPS proxy:
 
@@ -75,7 +79,7 @@ In another terminal, start local HTTPS proxy:
 caddy reverse-proxy --from https://localhost:8443 --to http://127.0.0.1:8080
 ```
 
-Trust Caddy local CA when browser prompts. Open setup URL printed by app, replacing nothing; `PUBLIC_BASE_URL` already points to local proxy.
+Trust Caddy local CA when browser prompts. Open `https://localhost:8443/setup` and enter `SETUP_PASSCODE` in form.
 
 Setup validates UniFi site immediately. Use real development UniFi endpoint, API key, and site ID. Google callback URI must be registered exactly as:
 
@@ -83,7 +87,7 @@ Setup validates UniFi site immediately. Use real development UniFi endpoint, API
 https://localhost:8443/auth/google/callback
 ```
 
-Delete `.data/gateway.db` to reset local setup. This destroys all local settings, users, coupons, audit events, and authorizations.
+To repeat local setup without deleting data, restart with `SETUP=true`, use `/setup`, then restore `SETUP=false`. Delete `.data/gateway.db` only when intentionally destroying all local settings, users, coupons, audit events, and authorizations.
 
 ### 3. Health and checks
 
@@ -159,9 +163,9 @@ In Dockge, create stack, paste repository `compose.yaml`, then enter values from
 cp .env.example .env
 ```
 
-Required changes: `PORTAL_HOSTNAME`, private LAN `ORIGIN_BIND_IP`, and restricted Cloudflare token. Enter full UniFi Network API URL later in one-time WebUI setup; no UniFi hostname, IP, or CA path belongs in default Dockge environment.
+Required changes: `PORTAL_HOSTNAME`, private LAN `ORIGIN_BIND_IP`, restricted Cloudflare token, `SETUP=true`, and a random `SETUP_PASSCODE` containing at least 16 bytes. Enter full UniFi Network API URL later in WebUI setup; no UniFi hostname, IP, or CA path belongs in default Dockge environment.
 
-App generates session and setup-encryption secrets on first startup and stores them as mode `0600` files in persistent `app-data` volume beside SQLite data. Later starts reuse same values. No secret generation or Dockge environment entry is required.
+App generates session and setup-encryption secrets on first startup and stores them as mode `0600` files in persistent `app-data` volume beside SQLite data. Later starts reuse same values. No secret generation or Dockge entry is required for those generated secrets.
 
 Pull released images and start services from repository root:
 
@@ -186,10 +190,10 @@ UniFi URL hostname must resolve from app container and match certificate SAN. Se
 Expected startup:
 
 - Caddy creates temporary `_acme-challenge` TXT record and obtains trusted certificate.
-- App logs one setup URL.
+- App exposes `/setup` only while `SETUP=true`.
 - Port 8080 has no host listener.
 
-Check status and obtain setup URL:
+Check status:
 
 ```sh
 docker compose ps
@@ -198,7 +202,7 @@ docker compose logs caddy
 curl --fail https://<PORTAL_HOSTNAME>/healthz
 ```
 
-Open one-time setup URL from app logs. Enter initial administrator, Google v2 credentials, exact lowercase Workspace domain, full UniFi Network API URL, UniFi API key, and site ID. Token expires after 30 minutes and cannot be reused after setup commit.
+Open `https://<PORTAL_HOSTNAME>/setup` from trusted on-site network. Enter `SETUP_PASSCODE`, administrator email, Google v2 credentials, exact lowercase Workspace domain, full UniFi Network API URL, UniFi API key, and site ID. After successful save, set `SETUP=false` and redeploy. To reconfigure later, temporarily set `SETUP=true`, redeploy, use same URL and passcode, then restore `SETUP=false`; existing users, coupons, authorizations, sessions, and audit history remain intact.
 
 ### 3. Operational verification
 
@@ -210,11 +214,11 @@ From organization or guest LAN:
 4. Confirm portal is unreachable from Internet/off-site network.
 5. Confirm first coupon device authorizes, over-limit device is denied, and admin revoke unauthorizes client.
 6. Confirm second staff device replaces oldest device when staff limit is one.
-7. Restart services and confirm setup does not reopen:
+7. Set `SETUP=false`, redeploy, and confirm `/setup` returns `404`:
 
 ```sh
-docker compose restart
-docker compose logs app
+docker compose up -d
+curl -o /dev/null -w '%{http_code}\n' https://<PORTAL_HOSTNAME>/setup
 ```
 
 ### Updates and backups

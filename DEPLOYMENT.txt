@@ -20,7 +20,7 @@ UniFi
 4. Private controller CA must be installed into app container trust store. Never disable TLS validation.
 
 Start
-1. Run ./deploy.sh on Linux Podman host. Confirm detected LAN IP, enter portal hostname, and enter Cloudflare token at hidden prompt. No .env file is used.
-2. Script generates app secrets, stores secrets in Podman secret store, builds images, and starts app plus Caddy in pod sengateway. Rootful Podman is simplest because pod binds ports 80/443.
-3. Confirm podman ps --pod --filter pod=sengateway shows both containers, app is healthy, and port 8080 has no host listener. Confirm trusted HTTPS from guest VLAN and failure from off-site Internet.
-4. Open one-time setup URL from podman logs sengateway-app. Configure initial admin, Google v2 client, exact lowercase Workspace domain, full UniFi Network API URL, API key, and site ID.
+1. Configure PORTAL_HOSTNAME, ORIGIN_BIND_IP, CLOUDFLARE_API_TOKEN, SETUP=true, and random SETUP_PASSCODE containing at least 16 bytes.
+2. Deploy stack. Confirm app is healthy, Caddy is running, and port 8080 has no host listener.
+3. Open https://PORTAL_HOSTNAME/setup from trusted on-site network. Enter setup passcode, initial admin, Google v2 client, exact lowercase Workspace domain, full UniFi Network API URL, API key, and site ID.
+4. After successful setup, set SETUP=false and redeploy. To reconfigure without deleting data, temporarily set SETUP=true, redeploy, use /setup, then restore SETUP=false.

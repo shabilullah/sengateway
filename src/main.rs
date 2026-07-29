@@ -16,9 +16,7 @@ use axum::{
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
 };
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use config::Config;
-use rand::RngCore;
 use secrecy::SecretString;
 use serde::Deserialize;
 use sha2::{Digest, Sha256, Sha512};
@@ -42,21 +40,12 @@ use tracing::{error, info};
 struct AppState {
     config: Config,
     pool: SqlitePool,
-    setup: Arc<Mutex<Option<SetupToken>>>,
     setup_done: Arc<RwLock<bool>>,
     attempts: Arc<Mutex<HashMap<IpAddr, Attempts>>>,
-}
-struct SetupToken {
-    hash: [u8; 32],
-    expires_at: i64,
 }
 struct Attempts {
     window: i64,
     failures: u8,
-}
-#[derive(Deserialize)]
-struct SetupQuery {
-    token: Option<String>,
 }
 #[derive(Deserialize)]
 struct HomeQuery {
@@ -67,7 +56,7 @@ struct HomeQuery {
 }
 #[derive(Deserialize)]
 struct SetupForm {
-    token: String,
+    passcode: String,
     initial_admin_email: String,
     google_auth_client_id: String,
     google_oauth_client_secret: String,
@@ -107,25 +96,9 @@ async fn main() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    let setup = if done {
-        None
-    } else {
-        let mut raw = [0u8; 32];
-        rand::rng().fill_bytes(&mut raw);
-        let token = URL_SAFE_NO_PAD.encode(raw);
-        println!(
-            "{}/setup?token={token}",
-            config.public_base_url.as_str().trim_end_matches('/')
-        );
-        Some(SetupToken {
-            hash: Sha256::digest(token.as_bytes()).into(),
-            expires_at: (OffsetDateTime::now_utc() + time::Duration::minutes(30)).unix_timestamp(),
-        })
-    };
     let state = AppState {
         config: config.clone(),
         pool: pool.clone(),
-        setup: Arc::new(Mutex::new(setup)),
         setup_done: Arc::new(RwLock::new(done)),
         attempts: Arc::new(Mutex::new(HashMap::new())),
     };
@@ -258,7 +231,6 @@ async fn setup_get(
     State(s): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
-    Query(q): Query<SetupQuery>,
 ) -> WebResult {
     trusted(
         &s,
@@ -267,14 +239,15 @@ async fn setup_get(
             .get("x-forwarded-proto")
             .and_then(|v| v.to_str().ok()),
     )?;
-    if *s.setup_done.read().await {
+    if !s.config.setup_enabled {
         return Err((StatusCode::NOT_FOUND, "not found"));
     }
-    let token = q.token.unwrap_or_default();
-    if !check_token(&s, &token, peer.ip()).await {
-        return Err((StatusCode::UNAUTHORIZED, "invalid or expired setup token"));
-    }
-    Ok(page("Setup",&format!(r#"<section><h1>Initial setup</h1><form method="post"><input type="hidden" name="token" value="{}"><label>Initial admin email<input required type="email" name="initial_admin_email"></label><label>Google client ID<input required name="google_auth_client_id"></label><label>Google client secret<input required type="password" name="google_oauth_client_secret"></label><label>Google OAuth version<input required name="google_oauth_version" value="v2"></label><label>Workspace domain<input required name="google_workspace_domain"></label><label>UniFi Network API URL<input required type="url" name="unifi_network_api_url" placeholder="https://unifi.local:11443/proxy/network/integration/v1"></label><label class="check"><input type="checkbox" name="trust_unifi_self_signed_certificate" value="true"> Trust certificate currently presented by this UniFi server</label><p class="hint">Enable only after independently confirming this URL reaches your UniFi server. Leave disabled when UniFi uses a certificate trusted by the operating system.</p><label>UniFi API key<input required type="password" name="unifi_api_key"></label><label>UniFi site ID<input required name="unifi_site_id"></label><button>Complete setup</button></form></section>"#,html(&token))).into_response())
+    let heading = if *s.setup_done.read().await {
+        "Reconfigure gateway"
+    } else {
+        "Initial setup"
+    };
+    Ok(page("Setup", &format!(r#"<section><h1>{heading}</h1><p class="hint">Setup remains available while SETUP=true. Set SETUP=false and redeploy after saving.</p><form method="post"><label>Setup passcode<input required type="password" name="passcode" autocomplete="current-password"></label><label>Administrator email<input required type="email" name="initial_admin_email"></label><label>Google client ID<input required name="google_auth_client_id"></label><label>Google client secret<input required type="password" name="google_oauth_client_secret"></label><label>Google OAuth version<input required name="google_oauth_version" value="v2"></label><label>Workspace domain<input required name="google_workspace_domain"></label><label>UniFi Network API URL<input required type="url" name="unifi_network_api_url" placeholder="https://unifi.local:11443/proxy/network/integration/v1"></label><label class="check"><input type="checkbox" name="trust_unifi_self_signed_certificate" value="true"> Trust certificate currently presented by this UniFi server</label><p class="hint">Enable only after independently confirming this URL reaches your UniFi server. Leave disabled when UniFi uses a certificate trusted by the operating system.</p><label>UniFi API key<input required type="password" name="unifi_api_key"></label><label>UniFi site ID<input required name="unifi_site_id"></label><button>Save setup</button></form></section>"#)).into_response())
 }
 async fn setup_post(
     State(s): State<AppState>,
@@ -289,8 +262,11 @@ async fn setup_post(
             .get("x-forwarded-proto")
             .and_then(|v| v.to_str().ok()),
     )?;
-    if !check_token(&s, &f.token, peer.ip()).await {
-        return Err((StatusCode::UNAUTHORIZED, "invalid or expired setup token"));
+    if !s.config.setup_enabled {
+        return Err((StatusCode::NOT_FOUND, "not found"));
+    }
+    if !check_passcode(&s, &f.passcode, peer.ip()).await {
+        return Err((StatusCode::UNAUTHORIZED, "invalid setup passcode"));
     }
     validate_setup(&f)?;
     let unifi_certificate = if f.trust_unifi_self_signed_certificate {
@@ -321,13 +297,24 @@ async fn setup_post(
     .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "encryption failed"))?;
     let now = OffsetDateTime::now_utc().unix_timestamp();
     let mut tx = s.pool.begin().await.map_err(internal)?;
-    sqlx::query("INSERT INTO settings(id,public_base_url,google_client_id,google_client_secret_ciphertext,google_client_secret_nonce,google_oauth_version,google_workspace_domain,unifi_network_api_url,unifi_api_key_ciphertext,unifi_api_key_nonce,unifi_site_id,staff_session_minutes,setup_completed_at,unifi_certificate_pem) VALUES(1,?,?,?,?,?,?,?,?,?,?,480,?,?)").bind(s.config.public_base_url.as_str()).bind(f.google_auth_client_id.trim()).bind(gc).bind(gn.as_slice()).bind("v2").bind(f.google_workspace_domain.trim()).bind(f.unifi_network_api_url.trim_end_matches('/')).bind(uc).bind(un.as_slice()).bind(f.unifi_site_id.trim()).bind(now).bind(unifi_certificate).execute(&mut *tx).await.map_err(internal)?;
-    sqlx::query("INSERT INTO users(email,role,approved,device_limit,created_at,updated_at) VALUES(?,'ADMIN',1,1,?,?)").bind(f.initial_admin_email.trim().to_lowercase()).bind(now).bind(now).execute(&mut *tx).await.map_err(internal)?;
-    audit(&mut tx, None, "SETUP_COMPLETED", "SETTINGS", Some(1), "{}")
-        .await
-        .map_err(internal)?;
+    let reconfiguring = *s.setup_done.read().await;
+    sqlx::query("INSERT INTO settings(id,public_base_url,google_client_id,google_client_secret_ciphertext,google_client_secret_nonce,google_oauth_version,google_workspace_domain,unifi_network_api_url,unifi_api_key_ciphertext,unifi_api_key_nonce,unifi_site_id,staff_session_minutes,setup_completed_at,unifi_certificate_pem) VALUES(1,?,?,?,?,?,?,?,?,?,?,480,?,?) ON CONFLICT(id) DO UPDATE SET public_base_url=excluded.public_base_url,google_client_id=excluded.google_client_id,google_client_secret_ciphertext=excluded.google_client_secret_ciphertext,google_client_secret_nonce=excluded.google_client_secret_nonce,google_oauth_version=excluded.google_oauth_version,google_workspace_domain=excluded.google_workspace_domain,unifi_network_api_url=excluded.unifi_network_api_url,unifi_api_key_ciphertext=excluded.unifi_api_key_ciphertext,unifi_api_key_nonce=excluded.unifi_api_key_nonce,unifi_site_id=excluded.unifi_site_id,setup_completed_at=excluded.setup_completed_at,unifi_certificate_pem=excluded.unifi_certificate_pem").bind(s.config.public_base_url.as_str()).bind(f.google_auth_client_id.trim()).bind(gc).bind(gn.as_slice()).bind("v2").bind(f.google_workspace_domain.trim()).bind(f.unifi_network_api_url.trim_end_matches('/')).bind(uc).bind(un.as_slice()).bind(f.unifi_site_id.trim()).bind(now).bind(unifi_certificate).execute(&mut *tx).await.map_err(internal)?;
+    sqlx::query("INSERT INTO users(email,role,approved,device_limit,created_at,updated_at) VALUES(?,'ADMIN',1,1,?,?) ON CONFLICT(email) DO UPDATE SET role='ADMIN',approved=1,updated_at=excluded.updated_at").bind(f.initial_admin_email.trim().to_lowercase()).bind(now).bind(now).execute(&mut *tx).await.map_err(internal)?;
+    audit(
+        &mut tx,
+        None,
+        if reconfiguring {
+            "SETUP_RECONFIGURED"
+        } else {
+            "SETUP_COMPLETED"
+        },
+        "SETTINGS",
+        Some(1),
+        "{}",
+    )
+    .await
+    .map_err(internal)?;
     tx.commit().await.map_err(internal)?;
-    *s.setup.lock().await = None;
     *s.setup_done.write().await = true;
     Ok(Redirect::to("/auth/google/start?intent=MANAGEMENT").into_response())
 }
@@ -545,7 +532,7 @@ fn validate_setup(f: &SetupForm) -> Result<(), (StatusCode, &'static str)> {
     }
     Ok(())
 }
-async fn check_token(s: &AppState, token: &str, ip: IpAddr) -> bool {
+async fn check_passcode(s: &AppState, passcode: &str, ip: IpAddr) -> bool {
     let now = OffsetDateTime::now_utc().unix_timestamp();
     let mut attempts = s.attempts.lock().await;
     let a = attempts.entry(ip).or_insert(Attempts {
@@ -559,12 +546,8 @@ async fn check_token(s: &AppState, token: &str, ip: IpAddr) -> bool {
     if a.failures >= 5 {
         return false;
     }
-    let guard = s.setup.lock().await;
-    let Some(expected) = guard.as_ref() else {
-        return false;
-    };
-    let got: [u8; 32] = Sha256::digest(token.as_bytes()).into();
-    let ok = expected.expires_at > now && bool::from(expected.hash.ct_eq(&got));
+    let got: [u8; 32] = Sha256::digest(passcode.as_bytes()).into();
+    let ok = bool::from(s.config.setup_passcode_hash.ct_eq(&got));
     if !ok {
         a.failures += 1
     }
@@ -648,7 +631,7 @@ mod tests {
 
     fn setup_form() -> SetupForm {
         SetupForm {
-            token: "token".into(),
+            passcode: "0123456789abcdef".into(),
             initial_admin_email: "admin@example.com".into(),
             google_auth_client_id: "client".into(),
             google_oauth_client_secret: "secret".into(),
@@ -673,5 +656,14 @@ mod tests {
                 "Workspace domain must be lowercase"
             ))
         );
+    }
+
+    #[test]
+    fn setup_passcode_comparison_is_exact() {
+        let expected: [u8; 32] = Sha256::digest(b"0123456789abcdef").into();
+        let matching: [u8; 32] = Sha256::digest(b"0123456789abcdef").into();
+        let different: [u8; 32] = Sha256::digest(b"0123456789abcdeg").into();
+        assert!(bool::from(expected.ct_eq(&matching)));
+        assert!(!bool::from(expected.ct_eq(&different)));
     }
 }
