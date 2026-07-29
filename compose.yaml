@@ -1,6 +1,6 @@
 services:
   app:
-    image: ${APP_IMAGE:-ghcr.io/shabilullah/sengateway:latest}
+    image: ghcr.io/shabilullah/sengateway:latest
     pull_policy: always
     restart: unless-stopped
     init: true
@@ -9,7 +9,7 @@ services:
       DATABASE_URL: "sqlite:/data/gateway.db?mode=rwc"
       SENGATEWAY_SECRET_DIR: /data
       COOKIE_SECURE: "true"
-      TRUSTED_PROXY_IP: ${PROXY_IPV4:-172.28.0.3}
+      TRUSTED_PROXY_IP: 172.28.0.3
       RUST_LOG: sengateway=info
     volumes:
       - app-data:/data
@@ -23,46 +23,61 @@ services:
       start_period: 10s
     networks:
       portal:
-        ipv4_address: ${APP_IPV4:-172.28.0.2}
+        ipv4_address: 172.28.0.2
     logging:
       options:
         max-size: "10m"
         max-file: "3"
 
   caddy:
-    image: ${CADDY_IMAGE:-ghcr.io/shabilullah/sengateway-caddy:latest}
+    image: ghcr.io/shabilullah/sengateway-caddy:latest
     pull_policy: always
     restart: unless-stopped
     init: true
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        cat >/tmp/Caddyfile <<'EOF'
+        {$$PORTAL_HOSTNAME} {
+          tls {
+            dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+          }
+          encode zstd gzip
+          header {
+            Content-Security-Policy "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; form-action 'self' https://accounts.google.com; frame-ancestors 'none'; base-uri 'none'"
+            X-Content-Type-Options nosniff
+            Referrer-Policy no-referrer
+          }
+          reverse_proxy app:8080
+        }
+        EOF
+        exec caddy run --config /tmp/Caddyfile --adapter caddyfile
     depends_on:
       app:
         condition: service_healthy
     environment:
       PORTAL_HOSTNAME: ${PORTAL_HOSTNAME:?Set PORTAL_HOSTNAME}
       CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN:?Set restricted Cloudflare DNS token}
-      CADDY_UPSTREAM: app:8080
     ports:
       - "${ORIGIN_BIND_IP:?Set private LAN ORIGIN_BIND_IP}:80:80"
       - "${ORIGIN_BIND_IP:?Set private LAN ORIGIN_BIND_IP}:443:443"
     volumes:
       - caddy-data:/data
       - caddy-config:/config
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
     networks:
       portal:
-        ipv4_address: ${PROXY_IPV4:-172.28.0.3}
+        ipv4_address: 172.28.0.3
     logging:
       options:
         max-size: "10m"
         max-file: "3"
-
 
 networks:
   portal:
     driver: bridge
     ipam:
       config:
-        - subnet: ${PORTAL_SUBNET:-172.28.0.0/24}
+        - subnet: 172.28.0.0/24
 
 volumes:
   app-data:

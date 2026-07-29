@@ -10,6 +10,7 @@ Replace every angle-bracket token below with deployment value. Keep tokens in do
 |---|---|---|
 | `<PORTAL_HOSTNAME>` | Portal DNS hostname | `portal.example.com` |
 | `<PORTAL_IPV4>` | Private IPv4 of Caddy portal host | `192.168.50.20` |
+| `<RESTRICTED_CLOUDFLARE_DNS_TOKEN>` | Cloudflare API token with DNS edit for portal zone only | Deployment secret; never commit |
 | `<UNIFI_HOSTNAME>` | UniFi controller hostname matching its TLS certificate | `unifi.example.internal` |
 | `<UNIFI_IPV4>` | Private IPv4 of UniFi controller | `192.168.50.10` |
 | `<UNIFI_PORT>` | UniFi HTTPS/API port | `443` or controller-specific port |
@@ -158,6 +159,126 @@ https://<PORTAL_HOSTNAME>/auth/google/callback
 - Permit TCP/80 and TCP/443 to `<PORTAL_IPV4>` only from organization and guest LANs. Port 80 only redirects to HTTPS.
 - Do not expose app port 8080.
 
+## Dockge deployment
+
+### 1. Create stack
+
+In Dockge, select **Compose > New Stack**, name it `sengateway`, then paste this complete Compose YAML. No repository checkout, external `Caddyfile`, bind mount, session secret, or encryption key is required.
+
+```yaml
+services:
+  app:
+    image: ghcr.io/shabilullah/sengateway:latest
+    pull_policy: always
+    restart: unless-stopped
+    init: true
+    environment:
+      PUBLIC_BASE_URL: "https://${PORTAL_HOSTNAME:?Set PORTAL_HOSTNAME}"
+      DATABASE_URL: "sqlite:/data/gateway.db?mode=rwc"
+      SENGATEWAY_SECRET_DIR: /data
+      COOKIE_SECURE: "true"
+      TRUSTED_PROXY_IP: 172.28.0.3
+      RUST_LOG: sengateway=info
+    volumes:
+      - app-data:/data
+    expose:
+      - "8080"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      portal:
+        ipv4_address: 172.28.0.2
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  caddy:
+    image: ghcr.io/shabilullah/sengateway-caddy:latest
+    pull_policy: always
+    restart: unless-stopped
+    init: true
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        cat >/tmp/Caddyfile <<'EOF'
+        {$$PORTAL_HOSTNAME} {
+          tls {
+            dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+          }
+          encode zstd gzip
+          header {
+            Content-Security-Policy "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; form-action 'self' https://accounts.google.com; frame-ancestors 'none'; base-uri 'none'"
+            X-Content-Type-Options nosniff
+            Referrer-Policy no-referrer
+          }
+          reverse_proxy app:8080
+        }
+        EOF
+        exec caddy run --config /tmp/Caddyfile --adapter caddyfile
+    depends_on:
+      app:
+        condition: service_healthy
+    environment:
+      PORTAL_HOSTNAME: ${PORTAL_HOSTNAME:?Set PORTAL_HOSTNAME}
+      CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN:?Set restricted Cloudflare DNS token}
+    ports:
+      - "${ORIGIN_BIND_IP:?Set private LAN ORIGIN_BIND_IP}:80:80"
+      - "${ORIGIN_BIND_IP:?Set private LAN ORIGIN_BIND_IP}:443:443"
+    volumes:
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      portal:
+        ipv4_address: 172.28.0.3
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  portal:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
+
+volumes:
+  app-data:
+  caddy-data:
+  caddy-config:
+```
+
+### 2. Set stack environment
+
+In Dockge stack **Environment**, add exactly these deployment values:
+
+```dotenv
+PORTAL_HOSTNAME=<PORTAL_HOSTNAME>
+ORIGIN_BIND_IP=<PORTAL_IPV4>
+CLOUDFLARE_API_TOKEN=<RESTRICTED_CLOUDFLARE_DNS_TOKEN>
+```
+
+`CLOUDFLARE_API_TOKEN` must be a Cloudflare API token restricted to DNS edit access for portal zone. Do not use Global API Key. Do not add quotes around values.
+
+Internal subnet `172.28.0.0/24` must be unused on deployment host. If it conflicts, change all four values together before deployment: subnet `172.28.0.0/24`, app address `172.28.0.2`, proxy address `172.28.0.3`, and `TRUSTED_PROXY_IP` `172.28.0.3`.
+
+### 3. Deploy and complete setup
+
+1. Select **Deploy** in Dockge.
+2. Wait until `app` reports `healthy` and `caddy` remains running.
+3. Open Dockge log for `app`. Copy one-time URL beginning `https://<PORTAL_HOSTNAME>/setup?token=`.
+4. Open URL from trusted on-site network before its ten-minute expiry.
+5. Enter initial administrator, Google OAuth, Workspace, and UniFi API values.
+6. For independently verified self-signed UniFi certificate, enable **Trust certificate currently presented by this UniFi server**. Leave disabled for publicly trusted certificate.
+7. Submit setup. Successful setup redirects to Google management login.
+
+App creates `.session-secret`, `.setup-encryption-key`, and SQLite database inside persistent `app-data` volume. Caddy stores ACME account and certificate state in `caddy-data`. Redeploying same Dockge stack preserves these volumes. Deleting stack volumes destroys gateway configuration, coupons, sessions, audit history, certificate pin, and generated secrets.
+
 ## UniFi API configuration
 
 Generate API key under **UniFi Network > Control Plane > Integrations**.
@@ -257,24 +378,7 @@ curl --fail https://<PORTAL_HOSTNAME>/healthz
 
 Expected HTTP status: `200`.
 
-On deployment host:
-
-```sh
-podman pod ps --filter name=sengateway
-podman ps --pod --filter pod=sengateway
-podman inspect sengateway-app --format '{{.State.Health.Status}}'
-podman logs --tail=100 sengateway-app
-podman logs --tail=100 sengateway-caddy
-```
-
-Expected containers:
-
-```text
-sengateway-app
-sengateway-caddy
-```
-
-Expected app health: `healthy`.
+In Dockge, open `sengateway`, confirm both `app` and `caddy` services are running, then open each service log. `app` must report `healthy`; `caddy` must show successful certificate loading or issuance for `<PORTAL_HOSTNAME>`. Generated container names differ between Docker Compose and Podman Compose, so operate by Dockge service name rather than hard-coded container name.
 
 ### Safe checks
 
