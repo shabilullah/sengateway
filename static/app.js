@@ -16,11 +16,74 @@
     });
   }
 
-  document.querySelectorAll('[data-confirm]').forEach((form) => {
-    form.addEventListener('submit', (event) => {
-      if (!confirm(form.dataset.confirm)) event.preventDefault();
+  const confirmForms = document.querySelectorAll('[data-confirm]');
+  if (confirmForms.length) {
+    const dialog = document.createElement('dialog');
+    dialog.className = 'confirm-modal';
+    dialog.setAttribute('aria-labelledby', 'confirm-title');
+    dialog.setAttribute('aria-describedby', 'confirm-message');
+    dialog.innerHTML = '<div class="confirm-card"><span class="confirm-mark" aria-hidden="true">!</span><p class="eyebrow">Confirm action</p><h2 id="confirm-title">Are you sure?</h2><p id="confirm-message"></p><div class="confirm-actions"><button type="button" class="secondary" data-confirm-cancel>Cancel</button><button type="button" class="danger" data-confirm-submit>Confirm</button></div></div>';
+    document.body.append(dialog);
+
+    const card = dialog.querySelector('.confirm-card');
+    const message = dialog.querySelector('#confirm-message');
+    const cancel = dialog.querySelector('[data-confirm-cancel]');
+    const submit = dialog.querySelector('[data-confirm-submit]');
+    let pendingForm;
+
+    const close = () => {
+      if (!dialog.open) return;
+      if (!reduce && anime) {
+        anime.animate(card, {
+          opacity: [1, 0],
+          scale: [1, 0.94],
+          y: [0, 16],
+          duration: 180,
+          ease: 'in(2)',
+          onComplete: () => dialog.close()
+        });
+      } else {
+        dialog.close();
+      }
+    };
+
+    confirmForms.forEach((form) => {
+      form.addEventListener('submit', (event) => {
+        event.preventDefault();
+        pendingForm = form;
+        message.textContent = form.dataset.confirm;
+        dialog.showModal();
+        if (!reduce && anime) {
+          anime.animate(card, {
+            opacity: [0, 1],
+            scale: [0.9, 1],
+            y: [24, 0],
+            duration: 360,
+            ease: 'out(4)'
+          });
+        }
+        cancel.focus();
+      });
     });
-  });
+
+    cancel.addEventListener('click', close);
+    dialog.addEventListener('cancel', (event) => {
+      event.preventDefault();
+      close();
+    });
+    dialog.addEventListener('click', (event) => {
+      if (event.target === dialog) close();
+    });
+    submit.addEventListener('click', () => {
+      if (!pendingForm) return;
+      submit.disabled = true;
+      pendingForm.submit();
+    });
+    dialog.addEventListener('close', () => {
+      pendingForm = undefined;
+      submit.disabled = false;
+    });
+  }
 
   document.querySelectorAll('[data-print]').forEach((button) => {
     button.addEventListener('click', () => window.print());
