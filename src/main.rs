@@ -113,6 +113,8 @@ async fn main() {
         .with_expiry(Expiry::OnInactivity(time::Duration::hours(8)));
     let app = Router::new()
         .route("/", get(home))
+        .route("/guest/s/{site}", get(home))
+        .route("/guest/s/{site}/", get(home))
         .route("/healthz", get(health))
         .route("/setup", get(setup_get).post(setup_post))
         .route("/portal", get(portal_get))
