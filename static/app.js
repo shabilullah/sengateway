@@ -22,6 +22,26 @@
     });
   });
 
+  document.querySelectorAll('[data-print]').forEach((button) => {
+    button.addEventListener('click', () => window.print());
+  });
+
+  const search = document.querySelector('[data-template-search]');
+  if (search) {
+    const cards = [...document.querySelectorAll('[data-template-card]')];
+    const empty = document.querySelector('[data-template-empty]');
+    search.addEventListener('input', () => {
+      const query = search.value.trim().toLocaleLowerCase();
+      let shown = 0;
+      cards.forEach((card) => {
+        const match = card.dataset.search.includes(query);
+        card.hidden = !match;
+        if (match) shown += 1;
+      });
+      if (empty) empty.hidden = shown !== 0;
+    });
+  }
+
   document.querySelectorAll('time[data-unix]').forEach((el) => {
     const value = Number(el.dataset.unix) * 1000;
     if (Number.isFinite(value)) el.textContent = new Date(value).toLocaleString();

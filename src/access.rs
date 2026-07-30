@@ -16,8 +16,8 @@ pub async fn redeem_coupon(
     let hash = coupon_hash(code);
     let mut tx = pool.begin().await.map_err(|_| "internal error")?;
     begin_immediate(&mut tx).await?;
-    let coupon = sqlx::query_as::<_, (i64, i64, i64, Option<i64>)>(
-        "SELECT id,device_limit,expires_at,revoked_at FROM coupons WHERE code_hash=?",
+    let coupon = sqlx::query_as::<_, (i64, i64, i64, Option<i64>, i64, i64)>(
+        "SELECT id,device_limit,expires_at,revoked_at,unlimited_devices,never_expires FROM coupons WHERE code_hash=?",
     )
     .bind(hash.as_slice())
     .fetch_optional(&mut *tx)
@@ -29,7 +29,7 @@ pub async fn redeem_coupon(
     }
     if sqlx::query_scalar::<_,i64>("SELECT EXISTS(SELECT 1 FROM device_authorizations WHERE coupon_id=? AND client_mac=? AND status='ACTIVE' AND expires_at>?)").bind(coupon.0).bind(mac).bind(now).fetch_one(&mut *tx).await.map_err(|_|"internal error")?!=0{return Ok(())}
     let count=sqlx::query_scalar::<_,i64>("SELECT COUNT(DISTINCT client_mac) FROM device_authorizations WHERE coupon_id=? AND status IN ('PENDING','ACTIVE') AND expires_at>?").bind(coupon.0).bind(now).fetch_one(&mut *tx).await.map_err(|_|"internal error")?;
-    if count >= coupon.1 {
+    if coupon.4 == 0 && count >= coupon.1 {
         return Err(INVALID_COUPON);
     }
     let client = unifi
@@ -38,7 +38,11 @@ pub async fn redeem_coupon(
         .map_err(|_| "Unable to contact network controller")?;
     let id=sqlx::query("INSERT INTO device_authorizations(kind,coupon_id,client_mac,unifi_client_id,status,expires_at,created_at) VALUES('COUPON',?,?,?,'PENDING',?,?)").bind(coupon.0).bind(mac).bind(&client.id).bind(coupon.2).bind(now).execute(&mut *tx).await.map_err(|_|INVALID_COUPON)?.last_insert_rowid();
     tx.commit().await.map_err(|_| "internal error")?;
-    let minutes = ((coupon.2 - now + 59) / 60).max(1);
+    let minutes = if coupon.5 == 1 {
+        None
+    } else {
+        Some(((coupon.2 - now + 59) / 60).max(1))
+    };
     finalize(
         pool,
         unifi.authorize(&client.id, minutes).await,
@@ -96,7 +100,7 @@ pub async fn authorize_staff(
     }
     finalize(
         pool,
-        unifi.authorize(&client.id, minutes).await,
+        unifi.authorize(&client.id, Some(minutes)).await,
         new_id,
         "STAFF_DEVICE_AUTHORIZED",
         user_id,

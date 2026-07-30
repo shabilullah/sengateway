@@ -175,15 +175,15 @@ impl UnifiClient {
             .find(|c| c.mac_address.eq_ignore_ascii_case(mac))
             .ok_or(UnifiError::NotFound)
     }
-    pub async fn authorize(&self, id: &str, minutes: i64) -> Result<(), UnifiError> {
-        if minutes < 1 {
+    pub async fn authorize(&self, id: &str, minutes: Option<i64>) -> Result<(), UnifiError> {
+        if minutes.is_some_and(|value| value < 1) {
             return Err(UnifiError::Request);
         }
         self.action(
             id,
             Action {
                 action: "AUTHORIZE_GUEST_ACCESS",
-                minutes: Some(minutes),
+                minutes,
             },
         )
         .await
@@ -312,5 +312,23 @@ mod tests {
         )
         .unwrap();
         client.site_check().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn authorize_without_duration_omits_time_limit() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/sites/site/clients/client/actions"))
+            .and(wiremock::matchers::body_json(serde_json::json!({
+                "action": "AUTHORIZE_GUEST_ACCESS"
+            })))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client =
+            UnifiClient::new(server.uri(), "site".into(), SecretString::from("key"), None).unwrap();
+
+        client.authorize("client", None).await.unwrap();
     }
 }

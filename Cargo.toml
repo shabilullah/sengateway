@@ -7,7 +7,7 @@ publish = false
 [dependencies]
 aes-gcm = "0.10"
 askama = "0.14"
-axum = { version = "0.8", features = ["form", "macros", "query"] }
+axum = { version = "0.8", features = ["form", "macros", "multipart", "query"] }
 base64 = "0.22"
 hex = "0.4"
 http = "1"

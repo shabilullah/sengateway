@@ -10,8 +10,8 @@ mod unifi;
 
 use axum::{
     Form, Router,
-    extract::{ConnectInfo, Query, Request, State},
-    http::{HeaderMap, StatusCode},
+    extract::{ConnectInfo, DefaultBodyLimit, Query, Request, State},
+    http::{HeaderMap, StatusCode, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
@@ -117,6 +117,7 @@ async fn main() {
         .route("/guest/s/{site}", get(home))
         .route("/guest/s/{site}/", get(home))
         .route("/healthz", get(health))
+        .route("/brand/logo", get(brand_logo))
         .route("/setup", get(setup_get).post(setup_post))
         .route("/portal", get(portal_get))
         .route("/portal/authorize", get(staff_authorize))
@@ -130,7 +131,13 @@ async fn main() {
             "/admin/templates",
             get(manage::templates).post(manage::create_template),
         )
-        .route("/admin/users", get(manage::users).post(manage::save_user))
+        .route(
+            "/admin/branding",
+            get(manage::branding)
+                .post(manage::save_branding)
+                .layer(DefaultBodyLimit::max(1_100_000)),
+        )
+        .route("/admin/branding/remove", post(manage::remove_branding))
         .route("/admin/users/{id}", post(manage::delete_user))
         .route(
             "/admin/authorizations/{id}/revoke",
@@ -215,14 +222,19 @@ fn page(title: &str, body: &str) -> Html<String> {
     ))
 }
 
-fn landing(portal_ready: bool) -> Html<String> {
+fn landing(portal_ready: bool, has_logo: bool) -> Html<String> {
     let form = if portal_ready {
         r#"<form method="post" action="/coupon/redeem"><label for="code">Voucher code</label><input id="code" required name="code" autocomplete="one-time-code" placeholder="XXXX-XXXX-XXXX"><button>Connect to internet</button></form>"#
     } else {
         r#"<form><label for="code">Voucher code</label><input id="code" disabled placeholder="XXXX-XXXX-XXXX"><button disabled>Connect to internet</button></form><p class="hint">Connect to guest Wi-Fi first. This page will reopen with your device details.</p>"#
     };
+    let logo = if has_logo {
+        r#"<img class="sen-logo" src="/brand/logo" alt="Organization logo">"#
+    } else {
+        ""
+    };
     Html(format!(
-        r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Internet access · SEN Gateway</title><link rel="stylesheet" href="/static/app.css">{}</head><body><header><a class="brand" href="/"><span class="brand-mark">SEN</span> Gateway</a><nav><a href="/auth/google/start?intent=PORTAL">Staff login</a><a href="/auth/google/start?intent=MANAGEMENT">Admin login</a></nav></header><main class="landing"><section data-motion><p class="eyebrow">Guest Wi-Fi</p><h1>Get online. Stay connected.</h1><p>Enter voucher provided by front desk.</p>{form}</section><aside id="staff-help" class="card" data-motion><p class="kicker">Team access</p><h2>Staff sign-in</h2><p>Connect to guest Wi-Fi, then use approved Google Workspace account.</p><a class="button secondary" href="/auth/google/start?intent=PORTAL">Continue with Google</a></aside></main></body></html>"#,
+        r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Internet access · SEN Gateway</title><link rel="stylesheet" href="/static/app.css">{}</head><body><header><a class="brand" href="/"><span class="brand-mark">SEN</span> Gateway</a><nav><a href="/auth/google/start?intent=PORTAL">Staff login</a><a href="/auth/google/start?intent=MANAGEMENT">Admin login</a></nav></header><main class="landing"><section data-motion>{logo}<p class="eyebrow">Guest Wi-Fi</p><h1>Get online. Stay connected.</h1><p>Enter voucher provided by front desk.</p>{form}</section><aside id="staff-help" class="card" data-motion><p class="kicker">Team access</p><h2>Staff sign-in</h2><p>Connect to guest Wi-Fi, then use approved Google Workspace account.</p><a class="button secondary" href="/auth/google/start?intent=PORTAL">Continue with Google</a></aside></main></body></html>"#,
         scripts(),
     ))
 }
@@ -340,7 +352,13 @@ async fn portal_get(
         .insert("portal_context", ctx)
         .await
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "session failure"))?;
-    Ok(landing(true).into_response())
+    let has_logo =
+        sqlx::query_scalar::<_, i64>("SELECT logo_data IS NOT NULL FROM settings WHERE id=1")
+            .fetch_one(&s.pool)
+            .await
+            .map_err(internal)?
+            != 0;
+    Ok(landing(true, has_logo).into_response())
 }
 #[derive(Deserialize)]
 struct CouponForm {
@@ -454,6 +472,27 @@ async fn load_unifi(s: &AppState) -> Result<unifi::UnifiClient, (StatusCode, &'s
     )
     .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "UniFi client failed"))
 }
+async fn brand_logo(State(s): State<AppState>) -> WebResult {
+    let row = sqlx::query("SELECT logo_content_type,logo_data FROM settings WHERE id=1")
+        .fetch_optional(&s.pool)
+        .await
+        .map_err(internal)?
+        .ok_or((StatusCode::NOT_FOUND, "logo not configured"))?;
+    let content_type: Option<String> = sqlx::Row::get(&row, "logo_content_type");
+    let data: Option<Vec<u8>> = sqlx::Row::get(&row, "logo_data");
+    let (content_type, data) = content_type
+        .zip(data)
+        .ok_or((StatusCode::NOT_FOUND, "logo not configured"))?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::CACHE_CONTROL, "no-cache".into()),
+        ],
+        data,
+    )
+        .into_response())
+}
+
 async fn home(
     State(s): State<AppState>,
     session: Session,
@@ -462,8 +501,14 @@ async fn home(
     if !*s.setup_done.read().await {
         return Err((StatusCode::SERVICE_UNAVAILABLE, "setup required"));
     }
+    let has_logo =
+        sqlx::query_scalar::<_, i64>("SELECT logo_data IS NOT NULL FROM settings WHERE id=1")
+            .fetch_one(&s.pool)
+            .await
+            .map_err(internal)?
+            != 0;
     let Some(id) = q.id else {
-        return Ok(landing(false).into_response());
+        return Ok(landing(false, has_logo).into_response());
     };
     let ctx = portal::PortalContext::try_from(portal::PortalQuery {
         id,
@@ -476,7 +521,7 @@ async fn home(
         .insert("portal_context", ctx)
         .await
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "session failure"))?;
-    Ok(landing(true).into_response())
+    Ok(landing(true, has_logo).into_response())
 }
 
 async fn fallback(State(s): State<AppState>) -> impl IntoResponse {
@@ -679,7 +724,7 @@ mod tests {
     #[test]
     fn staff_login_always_starts_portal_oauth() {
         for portal_ready in [false, true] {
-            let html = landing(portal_ready).0;
+            let html = landing(portal_ready, false).0;
             assert_eq!(
                 html.matches("href=\"/auth/google/start?intent=PORTAL\"")
                     .count(),
@@ -687,5 +732,11 @@ mod tests {
             );
             assert!(!html.contains("href=\"#staff-help\""));
         }
+    }
+    #[test]
+    fn landing_only_renders_configured_logo() {
+        assert!(!landing(false, false).0.contains("/brand/logo"));
+        assert!(landing(false, true).0.contains("src=\"/brand/logo\""));
+        assert!(!landing(false, true).0.contains("seameo-sen-logo.png"));
     }
 }
