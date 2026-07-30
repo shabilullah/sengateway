@@ -1,7 +1,6 @@
 use crate::{
     AppState, WebResult, audit, crypto,
     model::{generate_coupon, validity_minutes},
-    page,
 };
 use axum::{
     Form,

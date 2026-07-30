@@ -131,6 +131,7 @@ async fn main() {
             "/admin/templates",
             get(manage::templates).post(manage::create_template),
         )
+        .route("/admin/users", get(manage::users).post(manage::save_user))
         .route(
             "/admin/branding",
             get(manage::branding)
