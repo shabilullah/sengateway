@@ -375,6 +375,9 @@ async fn coupon_redeem(
     )
     .into_response())
 }
+fn can_authorize_device(role: &str) -> bool {
+    matches!(role, "ADMIN" | "FRONT_DESK" | "STAFF")
+}
 async fn staff_authorize(State(s): State<AppState>, session: Session) -> WebResult {
     let user_id = session
         .get::<i64>("user_id")
@@ -386,7 +389,7 @@ async fn staff_authorize(State(s): State<AppState>, session: Session) -> WebResu
         .await
         .map_err(|_| (StatusCode::UNAUTHORIZED, "login required"))?
         .ok_or((StatusCode::UNAUTHORIZED, "login required"))?;
-    if role != "STAFF" {
+    if !can_authorize_device(&role) {
         return Err((StatusCode::FORBIDDEN, "forbidden"));
     }
     let mut ctx: portal::PortalContext = session
@@ -667,5 +670,13 @@ mod tests {
         let different: [u8; 32] = Sha256::digest(b"0123456789abcdeg").into();
         assert!(bool::from(expected.ct_eq(&matching)));
         assert!(!bool::from(expected.ct_eq(&different)));
+    }
+
+    #[test]
+    fn all_approved_roles_can_authorize_devices() {
+        assert!(can_authorize_device("ADMIN"));
+        assert!(can_authorize_device("FRONT_DESK"));
+        assert!(can_authorize_device("STAFF"));
+        assert!(!can_authorize_device("UNKNOWN"));
     }
 }

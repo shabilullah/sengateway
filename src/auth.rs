@@ -141,7 +141,7 @@ pub async fn callback(
     if approved != 1
         || (!matches!(
             (pending.intent.as_str(), role.as_str()),
-            ("PORTAL", "STAFF") | ("MANAGEMENT", "ADMIN") | ("MANAGEMENT", "FRONT_DESK")
+            ("PORTAL", "ADMIN" | "FRONT_DESK" | "STAFF") | ("MANAGEMENT", "ADMIN" | "FRONT_DESK")
         ))
     {
         return deny(&s, Some(id), "role denied").await;
