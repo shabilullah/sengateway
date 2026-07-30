@@ -158,7 +158,7 @@ impl UnifiClient {
         self.accept(r).await.map(|_| ())
     }
     pub async fn resolve_mac(&self, mac: &str) -> Result<ClientRecord, UnifiError> {
-        let filter = format!("macAddress.eq('{mac}')");
+        let filter = format!("macAddress.eq('{}')", mac.to_ascii_lowercase());
         let r = self
             .request(
                 reqwest::Method::GET,
@@ -264,6 +264,33 @@ mod tests {
         Mock, MockServer, ResponseTemplate,
         matchers::{header, method, path},
     };
+
+    #[tokio::test]
+    async fn resolve_mac_uses_lowercase_filter() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/sites/site/clients"))
+            .and(wiremock::matchers::query_param(
+                "filter",
+                "macAddress.eq('76:6a:09:73:5c:88')",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "id": "client",
+                    "macAddress": "76:6a:09:73:5c:88",
+                    "access": {"authorized": false}
+                }]
+            })))
+            .mount(&server)
+            .await;
+        let client =
+            UnifiClient::new(server.uri(), "site".into(), SecretString::from("key"), None).unwrap();
+
+        assert_eq!(
+            client.resolve_mac("76:6A:09:73:5C:88").await.unwrap().id,
+            "client"
+        );
+    }
 
     #[tokio::test]
     async fn site_check_finds_site_in_list() {
