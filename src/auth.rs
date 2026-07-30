@@ -1,4 +1,4 @@
-use crate::{AppState, WebResult, audit, crypto};
+use crate::{AppState, WebResult, audit, crypto, portal::PortalContext};
 use axum::{
     Form,
     extract::{Query, State},
@@ -13,9 +13,9 @@ use openidconnect::{
 };
 use openidconnect::{EndpointMaybeSet, EndpointNotSet, EndpointSet};
 use secrecy::ExposeSecret;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use sqlx::Row;
-use subtle::ConstantTimeEq;
+use time::OffsetDateTime;
 use tower_sessions::Session;
 
 #[derive(Deserialize)]
@@ -27,12 +27,11 @@ pub struct Callback {
     pub code: String,
     pub state: String,
 }
-#[derive(Serialize, Deserialize)]
 struct Pending {
-    state: String,
     nonce: String,
     pkce: String,
     intent: String,
+    portal_context: Option<PortalContext>,
 }
 #[derive(Deserialize)]
 struct RawClaims {
@@ -60,18 +59,33 @@ pub async fn start(
         .add_scope(Scope::new("profile".into()))
         .set_pkce_challenge(challenge)
         .url();
-    session
-        .insert(
-            "oidc",
-            Pending {
-                state: state.secret().into(),
-                nonce: nonce.secret().into(),
-                pkce: verifier.secret().into(),
-                intent: q.intent,
-            },
-        )
-        .await
+    let portal_context = if q.intent == "PORTAL" {
+        session
+            .get::<PortalContext>("portal_context")
+            .await
+            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "session failure"))?
+    } else {
+        None
+    };
+    let portal_context_json = portal_context
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "session failure"))?;
+    sqlx::query("DELETE FROM oauth_attempts WHERE expires_at<=unixepoch()")
+        .execute(&s.pool)
+        .await
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "database failure"))?;
+    sqlx::query("INSERT INTO oauth_attempts(state,pkce,nonce,intent,portal_context_json,expires_at) VALUES(?,?,?,?,?,?)")
+        .bind(state.secret())
+        .bind(verifier.secret())
+        .bind(nonce.secret())
+        .bind(q.intent)
+        .bind(portal_context_json)
+        .bind((OffsetDateTime::now_utc() + time::Duration::minutes(10)).unix_timestamp())
+        .execute(&s.pool)
+        .await
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "database failure"))?;
     Ok(Redirect::to(url.as_str()).into_response())
 }
 pub async fn callback(
@@ -79,14 +93,22 @@ pub async fn callback(
     session: Session,
     Query(q): Query<Callback>,
 ) -> WebResult {
-    let pending: Pending = session
-        .remove("oidc")
+    let row = sqlx::query("DELETE FROM oauth_attempts WHERE state=? AND expires_at>unixepoch() RETURNING pkce,nonce,intent,portal_context_json")
+        .bind(&q.state)
+        .fetch_optional(&s.pool)
         .await
-        .map_err(|_| (StatusCode::BAD_REQUEST, "fresh login required"))?
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "database failure"))?
         .ok_or((StatusCode::BAD_REQUEST, "fresh login required"))?;
-    if !bool::from(pending.state.as_bytes().ct_eq(q.state.as_bytes())) {
-        return Err((StatusCode::BAD_REQUEST, "fresh login required"));
-    }
+    let pending = Pending {
+        pkce: row.get("pkce"),
+        nonce: row.get("nonce"),
+        intent: row.get("intent"),
+        portal_context: row
+            .get::<Option<String>, _>("portal_context_json")
+            .map(|json| serde_json::from_str(&json))
+            .transpose()
+            .map_err(|_| (StatusCode::BAD_REQUEST, "fresh login required"))?,
+    };
     let (client, domain) = client(&s).await?;
     let http = openidconnect::reqwest::ClientBuilder::new()
         .redirect(reqwest::redirect::Policy::none())
@@ -182,6 +204,12 @@ pub async fn callback(
         .insert("role", role)
         .await
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "session failure"))?;
+    if let Some(portal_context) = pending.portal_context {
+        session
+            .insert("portal_context", portal_context)
+            .await
+            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "session failure"))?;
+    }
     Ok(Redirect::to(if pending.intent == "MANAGEMENT" {
         "/manage"
     } else {
@@ -272,4 +300,44 @@ async fn deny(s: &AppState, id: Option<i64>, reason: &str) -> WebResult {
         StatusCode::FORBIDDEN,
         "Internet access not enabled; contact administrator",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn oauth_attempt_transfers_portal_context_once() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!().run(&pool).await.unwrap();
+        let context = PortalContext {
+            mac: "02:00:00:00:00:01".into(),
+            ap: None,
+            ssid: Some("Guest".into()),
+            redirect_url: Some("http://neverssl.com/".into()),
+            expires_at: OffsetDateTime::now_utc().unix_timestamp() + 600,
+            used: false,
+        };
+        sqlx::query("INSERT INTO oauth_attempts(state,pkce,nonce,intent,portal_context_json,expires_at) VALUES('state','pkce','nonce','PORTAL',?,unixepoch()+600)")
+            .bind(serde_json::to_string(&context).unwrap())
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let row = sqlx::query("DELETE FROM oauth_attempts WHERE state='state' AND expires_at>unixepoch() RETURNING portal_context_json")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let restored: PortalContext =
+            serde_json::from_str(&row.get::<String, _>("portal_context_json")).unwrap();
+        assert_eq!(restored.mac, context.mac);
+        assert_eq!(restored.redirect_url, context.redirect_url);
+        assert!(
+            sqlx::query("SELECT 1 FROM oauth_attempts WHERE state='state'")
+                .fetch_optional(&pool)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
 }
