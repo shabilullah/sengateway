@@ -197,7 +197,7 @@ pub async fn logout(
         .flush()
         .await
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "session failure"))?;
-    Ok(Redirect::to("/portal").into_response())
+    Ok(Redirect::to("/").into_response())
 }
 async fn client(
     s: &AppState,
