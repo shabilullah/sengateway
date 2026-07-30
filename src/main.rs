@@ -215,18 +215,13 @@ fn page(title: &str, body: &str) -> Html<String> {
 }
 
 fn landing(portal_ready: bool) -> Html<String> {
-    let staff_href = if portal_ready {
-        "/auth/google/start?intent=PORTAL"
-    } else {
-        "#staff-help"
-    };
     let form = if portal_ready {
         r#"<form method="post" action="/coupon/redeem"><label for="code">Voucher code</label><input id="code" required name="code" autocomplete="one-time-code" placeholder="XXXX-XXXX-XXXX"><button>Connect to internet</button></form>"#
     } else {
         r#"<form><label for="code">Voucher code</label><input id="code" disabled placeholder="XXXX-XXXX-XXXX"><button disabled>Connect to internet</button></form><p class="hint">Connect to guest Wi-Fi first. This page will reopen with your device details.</p>"#
     };
     Html(format!(
-        r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Internet access</title><link rel="stylesheet" href="/static/app.css"></head><body><header><a class="brand" href="/">SEN Gateway</a><nav><a href="{staff_href}">Staff login</a><a href="/auth/google/start?intent=MANAGEMENT">Admin login</a></nav></header><main class="landing"><section><p class="eyebrow">Guest Wi-Fi</p><h1>Connect with voucher</h1><p>Enter voucher provided by front desk.</p>{form}</section><aside id="staff-help" class="card"><h2>Staff access</h2><p>Staff must connect to guest Wi-Fi before signing in with Google Workspace.</p><a class="button secondary" href="{staff_href}">Staff login</a></aside></main></body></html>"#
+        r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Internet access</title><link rel="stylesheet" href="/static/app.css"></head><body><header><a class="brand" href="/">SEN Gateway</a><nav><a href="/auth/google/start?intent=PORTAL">Staff login</a><a href="/auth/google/start?intent=MANAGEMENT">Admin login</a></nav></header><main class="landing"><section><p class="eyebrow">Guest Wi-Fi</p><h1>Connect with voucher</h1><p>Enter voucher provided by front desk.</p>{form}</section><aside id="staff-help" class="card"><h2>Staff access</h2><p>Staff must connect to guest Wi-Fi before signing in with Google Workspace.</p><a class="button secondary" href="/auth/google/start?intent=PORTAL">Staff login</a></aside></main></body></html>"#,
     ))
 }
 async fn setup_get(
@@ -678,5 +673,18 @@ mod tests {
         assert!(can_authorize_device("FRONT_DESK"));
         assert!(can_authorize_device("STAFF"));
         assert!(!can_authorize_device("UNKNOWN"));
+    }
+
+    #[test]
+    fn staff_login_always_starts_portal_oauth() {
+        for portal_ready in [false, true] {
+            let html = landing(portal_ready).0;
+            assert_eq!(
+                html.matches("href=\"/auth/google/start?intent=PORTAL\"")
+                    .count(),
+                2
+            );
+            assert!(!html.contains("href=\"#staff-help\""));
+        }
     }
 }
