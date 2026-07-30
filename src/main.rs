@@ -29,6 +29,7 @@ use std::{
 use subtle::ConstantTimeEq;
 use time::OffsetDateTime;
 use tokio::sync::{Mutex, RwLock};
+use tower_http::services::ServeDir;
 use tower_sessions::{
     Expiry, Session, SessionManagerLayer,
     cookie::{Key, SameSite},
@@ -130,6 +131,7 @@ async fn main() {
             get(manage::templates).post(manage::create_template),
         )
         .route("/admin/users", get(manage::users).post(manage::save_user))
+        .route("/admin/users/{id}", post(manage::delete_user))
         .route(
             "/admin/authorizations/{id}/revoke",
             post(revoke::authorization),
@@ -137,7 +139,7 @@ async fn main() {
         .route("/admin/coupons/{id}/revoke", post(revoke::coupon))
         .route("/admin/diagnostics", get(diagnostics))
         .route("/admin/{kind}", get(manage::simple))
-        .route("/static/app.css", get(css))
+        .nest_service("/static", ServeDir::new("static"))
         .fallback(fallback)
         .layer(middleware::from_fn_with_state(state.clone(), security_gate))
         .layer(sessions)
@@ -202,15 +204,14 @@ async fn health(State(s): State<AppState>) -> impl IntoResponse {
         StatusCode::OK
     }
 }
-async fn css() -> impl IntoResponse {
-    (
-        [(axum::http::header::CONTENT_TYPE, "text/css; charset=utf-8")],
-        include_str!("../static/app.css"),
-    )
+
+fn scripts() -> &'static str {
+    r#"<script defer src="/static/anime.umd.min.js"></script><script defer src="/static/app.js"></script>"#
 }
 fn page(title: &str, body: &str) -> Html<String> {
     Html(format!(
-        r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{title}</title><link rel="stylesheet" href="/static/app.css"></head><body><header><a class="brand" href="/">SEN Gateway</a></header><main>{body}</main></body></html>"#
+        r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{title} · SEN Gateway</title><link rel="stylesheet" href="/static/app.css">{}</head><body><header><a class="brand" href="/"><span class="brand-mark">SEN</span> Gateway</a></header><main>{body}</main></body></html>"#,
+        scripts()
     ))
 }
 
@@ -221,7 +222,8 @@ fn landing(portal_ready: bool) -> Html<String> {
         r#"<form><label for="code">Voucher code</label><input id="code" disabled placeholder="XXXX-XXXX-XXXX"><button disabled>Connect to internet</button></form><p class="hint">Connect to guest Wi-Fi first. This page will reopen with your device details.</p>"#
     };
     Html(format!(
-        r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Internet access</title><link rel="stylesheet" href="/static/app.css"></head><body><header><a class="brand" href="/">SEN Gateway</a><nav><a href="/auth/google/start?intent=PORTAL">Staff login</a><a href="/auth/google/start?intent=MANAGEMENT">Admin login</a></nav></header><main class="landing"><section><p class="eyebrow">Guest Wi-Fi</p><h1>Connect with voucher</h1><p>Enter voucher provided by front desk.</p>{form}</section><aside id="staff-help" class="card"><h2>Staff access</h2><p>Staff must connect to guest Wi-Fi before signing in with Google Workspace.</p><a class="button secondary" href="/auth/google/start?intent=PORTAL">Staff login</a></aside></main></body></html>"#,
+        r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Internet access · SEN Gateway</title><link rel="stylesheet" href="/static/app.css">{}</head><body><header><a class="brand" href="/"><span class="brand-mark">SEN</span> Gateway</a><nav><a href="/auth/google/start?intent=PORTAL">Staff login</a><a href="/auth/google/start?intent=MANAGEMENT">Admin login</a></nav></header><main class="landing"><section data-motion><p class="eyebrow">Guest Wi-Fi</p><h1>Get online. Stay connected.</h1><p>Enter voucher provided by front desk.</p>{form}</section><aside id="staff-help" class="card" data-motion><p class="kicker">Team access</p><h2>Staff sign-in</h2><p>Connect to guest Wi-Fi, then use approved Google Workspace account.</p><a class="button secondary" href="/auth/google/start?intent=PORTAL">Continue with Google</a></aside></main></body></html>"#,
+        scripts(),
     ))
 }
 async fn setup_get(
@@ -410,14 +412,7 @@ async fn staff_authorize(State(s): State<AppState>, session: Session) -> WebResu
     .into_response())
 }
 async fn diagnostics(State(s): State<AppState>, session: Session) -> WebResult {
-    let role = session
-        .get::<String>("role")
-        .await
-        .map_err(|_| (StatusCode::UNAUTHORIZED, "login required"))?
-        .ok_or((StatusCode::UNAUTHORIZED, "login required"))?;
-    if role != "ADMIN" {
-        return Err((StatusCode::FORBIDDEN, "forbidden"));
-    }
+    let (_, _, csrf) = manage::guard(&session, &["ADMIN"]).await?;
     let client = load_unifi(&s).await?;
     let status = match client.readiness_check().await {
         Ok(()) => "healthy",
@@ -428,7 +423,13 @@ async fn diagnostics(State(s): State<AppState>, session: Session) -> WebResult {
         .await
         .map(|t| t.to_string())
         .unwrap_or_else(|| "never".into());
-    Ok(page("Diagnostics",&format!("<section><h1>UniFi diagnostics</h1><p>Endpoint: {}</p><p>Site: {}</p><p>Status: {status}</p><p>Last successful request: {last}</p></section>",html(&client.redacted_endpoint()),html(client.site()))).into_response())
+    let body = format!(
+        r#"<div class="page-head" data-motion><div><p class="eyebrow">Controller health</p><h1>Diagnostics.</h1></div><span class="badge{}">{status}</span></div><section data-motion><h2>UniFi Network</h2><p><strong>Endpoint</strong><br>{}</p><p><strong>Site</strong><br>{}</p><p><strong>Last successful request</strong><br>{last}</p></section>"#,
+        if status == "healthy" { "" } else { " off" },
+        html(&client.redacted_endpoint()),
+        html(client.site())
+    );
+    Ok(manage::admin_page("Diagnostics", "diagnostics", &csrf, &body).into_response())
 }
 async fn load_unifi(s: &AppState) -> Result<unifi::UnifiClient, (StatusCode, &'static str)> {
     use secrecy::ExposeSecret;

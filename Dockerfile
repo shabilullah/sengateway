@@ -10,6 +10,8 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl openssl && rm -rf /var/lib/apt/lists/*
 RUN mkdir /data && chown 65532:65532 /data
 COPY --from=build /src/target/release/sengateway /usr/local/bin/sengateway
+COPY --from=build /src/static /usr/local/share/sengateway/static
+WORKDIR /usr/local/share/sengateway
 USER 65532:65532
 VOLUME ["/data"]
 EXPOSE 8080
