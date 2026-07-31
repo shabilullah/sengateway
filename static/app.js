@@ -191,7 +191,7 @@
         providerButton,
         providerStatus,
         providerFields,
-        '/setup/verify-google',
+        '/setup/verify-providers',
         'Testing Google OAuth credentials…',
         'Google OAuth verification failed',
         () => { providersVerified = true; }

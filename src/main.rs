@@ -134,7 +134,26 @@ async fn main() {
         .with_same_site(SameSite::Lax)
         .with_signed(key)
         .with_expiry(Expiry::OnInactivity(time::Duration::hours(8)));
-    let app = Router::new()
+    let app = application_routes()
+        .layer(middleware::from_fn_with_state(state.clone(), security_gate))
+        .layer(sessions)
+        .with_state(state.clone());
+
+    tokio::spawn(reconcile(state));
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:8080")
+        .await
+        .expect("bind");
+    info!("listening on 8080");
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown())
+    .await
+    .expect("server");
+}
+fn application_routes() -> Router<AppState> {
+    Router::new()
         .route("/", get(home))
         .route("/guest/s/{site}", get(home))
         .route("/guest/s/{site}/", get(home))
@@ -142,7 +161,7 @@ async fn main() {
         .route("/brand/logo", get(brand_logo))
         .route("/setup", get(setup_get).post(setup_post))
         .route("/setup/verify-unifi", post(setup_verify_unifi))
-        .route("/setup/verify-google", post(setup_verify_google))
+        .route("/setup/verify-providers", post(setup_verify_google))
         .route("/portal", get(portal_get))
         .route("/portal/authorize", get(staff_authorize))
         .route("/coupon/redeem", post(coupon_redeem))
@@ -173,22 +192,6 @@ async fn main() {
         .route("/admin/{kind}", get(manage::simple))
         .nest_service("/static", ServeDir::new("static"))
         .fallback(fallback)
-        .layer(middleware::from_fn_with_state(state.clone(), security_gate))
-        .layer(sessions)
-        .with_state(state.clone());
-
-    tokio::spawn(reconcile(state));
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:8080")
-        .await
-        .expect("bind");
-    info!("listening on 8080");
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(shutdown())
-    .await
-    .expect("server");
 }
 
 async fn security_gate(State(s): State<AppState>, request: Request, next: Next) -> Response {
@@ -960,6 +963,83 @@ mod tests {
         let different: [u8; 32] = Sha256::digest(b"0123456789abcdeg").into();
         assert!(bool::from(expected.ct_eq(&matching)));
         assert!(!bool::from(expected.ct_eq(&different)));
+    }
+    #[tokio::test]
+    async fn every_application_route_is_registered() {
+        use axum::{body::Body, http::Method};
+        use tower::ServiceExt;
+
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!().run(&pool).await.unwrap();
+        let state = AppState {
+            config: Config {
+                public_base_url: url::Url::parse("https://gateway.example.com").unwrap(),
+                database_url: "sqlite::memory:".into(),
+                session_secret: vec![0; 32],
+                encryption_key: [0; 32],
+                cookie_secure: true,
+                trusted_proxy_ip: "127.0.0.1".parse().unwrap(),
+                setup_enabled: true,
+                setup_passcode_hash: [0; 32],
+            },
+            pool,
+            setup_done: Arc::new(RwLock::new(false)),
+            attempts: Arc::new(Mutex::new(HashMap::new())),
+        };
+        let app = application_routes().with_state(state);
+        let routes = [
+            (Method::POST, "/"),
+            (Method::POST, "/guest/s/default"),
+            (Method::POST, "/guest/s/default/"),
+            (Method::POST, "/healthz"),
+            (Method::POST, "/brand/logo"),
+            (Method::PUT, "/setup"),
+            (Method::GET, "/setup/verify-unifi"),
+            (Method::GET, "/setup/verify-providers"),
+            (Method::POST, "/portal"),
+            (Method::POST, "/portal/authorize"),
+            (Method::GET, "/coupon/redeem"),
+            (Method::POST, "/auth/google/start"),
+            (Method::POST, "/auth/google/callback"),
+            (Method::GET, "/logout"),
+            (Method::POST, "/manage"),
+            (Method::GET, "/manage/coupons/issue"),
+            (Method::PUT, "/admin/templates"),
+            (Method::PUT, "/admin/users"),
+            (Method::PUT, "/admin/branding"),
+            (Method::GET, "/admin/branding/remove"),
+            (Method::GET, "/admin/users/1"),
+            (Method::GET, "/admin/authorizations/1/revoke"),
+            (Method::GET, "/admin/coupons/1/revoke"),
+            (Method::POST, "/admin/diagnostics"),
+            (Method::POST, "/admin/settings"),
+            (Method::POST, "/static/app.js"),
+        ];
+        for (method, path) in routes {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(path)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::METHOD_NOT_ALLOWED,
+                "route missing: {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn setup_script_uses_registered_google_verification_route() {
+        let script = include_str!("../static/app.js");
+        assert!(script.contains("'/setup/verify-providers'"));
+        assert!(!script.contains("/setup/verify-google"));
     }
 
     #[test]
