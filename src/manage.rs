@@ -64,7 +64,7 @@ pub async fn home(State(s): State<AppState>, session: Session) -> WebResult {
     let rows = sqlx::query("SELECT id,name,device_limit,validity_minutes,unlimited_devices,never_expires FROM coupon_templates WHERE active=1 ORDER BY name")
         .fetch_all(&s.pool).await.map_err(db)?;
     let mut body = String::from(
-        r#"<div class="page-head" data-motion><div><p class="eyebrow">Front desk</p><h1>Issue access.</h1><p>Create up to 10 guest Wi-Fi coupons at once.</p></div></div><section class="search-panel" data-motion><label for="template-search">Search templates<input id="template-search" type="search" data-template-search placeholder="Name, devices, or validity"></label></section><div class="stack" data-template-list>"#,
+        r#"<div class="page-head" data-motion><div><p class="eyebrow">Front desk</p><h1>Issue access.</h1><p>Create up to 20 guest Wi-Fi coupons at once.</p></div></div><section class="search-panel" data-motion><label for="template-search">Search templates<input id="template-search" type="search" data-template-search placeholder="Name, devices, or validity"></label></section><div class="stack" data-template-list>"#,
     );
     for r in rows {
         let name: String = r.get("name");
@@ -78,7 +78,7 @@ pub async fn home(State(s): State<AppState>, session: Session) -> WebResult {
         } else {
             format!("{} minutes", r.get::<i64, _>("validity_minutes"))
         };
-        body.push_str(&format!(r#"<section class="card" data-motion data-template-card data-search="{} {} {}"><h2>{}</h2><p><strong>{devices}</strong> · {validity}</p><form class="form-grid" method="post" action="/manage/coupons/issue"><input type="hidden" name="csrf" value="{csrf}"><input type="hidden" name="template_id" value="{}"><label>Quantity<input type="number" name="quantity" min="1" max="10" value="1" required></label><label>Operator note<input maxlength="120" name="note" placeholder="Optional"></label><button>Generate coupons</button></form></section>"#, crate::html(&name.to_lowercase()), crate::html(&devices.to_lowercase()), crate::html(&validity.to_lowercase()), crate::html(&name), r.get::<i64,_>("id")));
+        body.push_str(&format!(r#"<section class="card" data-motion data-template-card data-search="{} {} {}"><h2>{}</h2><p><strong>{devices}</strong> · {validity}</p><form class="form-grid" method="post" action="/manage/coupons/issue"><input type="hidden" name="csrf" value="{csrf}"><input type="hidden" name="template_id" value="{}"><label>Quantity<input type="number" name="quantity" min="1" max="20" value="1" required></label><label>Operator note<input maxlength="120" name="note" placeholder="Optional"></label><button>Generate coupons</button></form></section>"#, crate::html(&name.to_lowercase()), crate::html(&devices.to_lowercase()), crate::html(&validity.to_lowercase()), crate::html(&name), r.get::<i64,_>("id")));
     }
     body.push_str(r#"</div><div class="empty" data-template-empty hidden><h2>No matching templates.</h2></div>"#);
     Ok(if role == "ADMIN" {
@@ -147,7 +147,7 @@ pub async fn create_template(
 }
 
 fn valid_quantity(quantity: u8) -> bool {
-    (1..=10).contains(&quantity)
+    (1..=20).contains(&quantity)
 }
 
 pub async fn issue(
@@ -160,7 +160,7 @@ pub async fn issue(
         return Err((StatusCode::BAD_REQUEST, "note too long"));
     }
     if !valid_quantity(f.quantity) {
-        return Err((StatusCode::BAD_REQUEST, "quantity must be between 1 and 10"));
+        return Err((StatusCode::BAD_REQUEST, "quantity must be between 1 and 20"));
     }
     let t = sqlx::query(
         "SELECT name,device_limit,validity_minutes,unlimited_devices,never_expires FROM coupon_templates WHERE id=? AND active=1",
@@ -753,9 +753,9 @@ mod tests {
     #[test]
     fn coupon_batch_bounds_and_admin_shell_contract() {
         assert!(valid_quantity(1));
-        assert!(valid_quantity(10));
+        assert!(valid_quantity(20));
         assert!(!valid_quantity(0));
-        assert!(!valid_quantity(11));
+        assert!(!valid_quantity(21));
         let html = admin_page(
             "Issued",
             "manage",
