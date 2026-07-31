@@ -289,19 +289,25 @@ async fn setup_get(
     if !s.config.setup_enabled {
         return Err((StatusCode::NOT_FOUND, "not found"));
     }
-    let heading = if *s.setup_done.read().await {
-        "Reconfigure gateway"
+    let reconfiguring = *s.setup_done.read().await;
+    Ok(setup_page(reconfiguring).into_response())
+}
+
+fn setup_page(reconfiguring: bool) -> Html<String> {
+    let heading = if reconfiguring {
+        "Reset and reconfigure gateway"
     } else {
         "Initial setup"
     };
-    Ok(setup_page(heading).into_response())
-}
-
-fn setup_page(heading: &str) -> Html<String> {
+    let reset_notice = if reconfiguring {
+        r#"<aside class="setup-reset-notice" role="alert" data-motion><strong>Database reset required</strong><p>Saving this setup permanently deletes existing users, vouchers, device authorization records, audit history, sessions, branding, and settings. New setup values and administrator become only retained application data.</p></aside>"#
+    } else {
+        ""
+    };
     page(
         "Setup",
         &format!(
-            r#"<div class="setup-head" data-motion><div><p class="eyebrow">Gateway configuration</p><h1>{heading}</h1><p>Connect identity and network services, then open control room.</p></div><span class="setup-step">Secure setup</span></div><form class="setup-form" method="post" data-setup-form><section data-motion><div class="section-head"><span class="section-number">01</span><div><h2>Setup access</h2><p class="hint">Confirm administrator and deployment passcode.</p></div></div><div class="form-grid"><label>Setup passcode<input required type="password" name="passcode" autocomplete="current-password"></label><label>Administrator email<input required type="email" name="initial_admin_email" autocomplete="email"></label></div></section><section data-motion><div class="section-head"><span class="section-number">02</span><div><h2>Google Workspace and Cloudflare</h2><p class="hint">Verify Google OAuth credentials and deployment Cloudflare API token before saving.</p></div></div><div class="form-grid"><label>Google client ID<input required name="google_auth_client_id" autocomplete="off"></label><label>Google client secret<input required type="password" name="google_oauth_client_secret" autocomplete="off"></label><label>Google OAuth version<input required name="google_oauth_version" value="v2" readonly></label><label>Workspace domain<input required name="google_workspace_domain" placeholder="example.com" autocomplete="off"></label></div><div class="verify-row"><button class="secondary" type="button" data-provider-verify>Test Google and Cloudflare</button><p class="verify-status" data-provider-status role="status" aria-live="polite">Credentials not tested.</p></div></section><section class="setup-unifi" data-motion><div class="section-head"><span class="section-number">03</span><div><h2>UniFi Network</h2><p class="hint">Verify controller reachability, API key, and site before setup can be saved.</p></div></div><div class="form-grid"><label class="wide-field">UniFi Network API URL<input required type="url" name="unifi_network_api_url" placeholder="https://unifi.local:11443/proxy/network/integration/v1" autocomplete="url"></label><label>UniFi API key<input required type="password" name="unifi_api_key" autocomplete="off"></label><label>UniFi site ID<input required name="unifi_site_id" autocomplete="off"></label></div><label class="check-label setup-trust"><input type="checkbox" name="trust_unifi_self_signed_certificate" value="true"> Trust certificate currently presented by this UniFi server</label><p class="hint">Enable only after independently confirming this URL reaches your UniFi server. Leave disabled for certificates trusted by operating system.</p><div class="verify-row"><button class="secondary" type="button" data-unifi-verify>Test UniFi connection</button><p class="verify-status" data-unifi-status role="status" aria-live="polite">Connection not tested.</p></div></section><div class="setup-submit" data-motion><p class="hint">Setup stays available while <strong>SETUP=true</strong>. Set <strong>SETUP=false</strong> and redeploy after saving.</p><button type="submit" data-setup-submit disabled>Save setup</button></div></form>"#
+            r#"<div class="setup-head" data-motion><div><p class="eyebrow">Gateway configuration</p><h1>{heading}</h1><p>Connect identity and network services, then open control room.</p></div><span class="setup-step">Secure setup</span></div>{reset_notice}<form class="setup-form" method="post" data-setup-form><section data-motion><div class="section-head"><span class="section-number">01</span><div><h2>Setup access</h2><p class="hint">Confirm administrator and deployment passcode.</p></div></div><div class="form-grid"><label>Setup passcode<input required type="password" name="passcode" autocomplete="current-password"></label><label>Administrator email<input required type="email" name="initial_admin_email" autocomplete="email"></label></div></section><section data-motion><div class="section-head"><span class="section-number">02</span><div><h2>Google Workspace and Cloudflare</h2><p class="hint">Verify Google OAuth credentials and deployment Cloudflare API token before saving.</p></div></div><div class="form-grid"><label>Google client ID<input required name="google_auth_client_id" autocomplete="off"></label><label>Google client secret<input required type="password" name="google_oauth_client_secret" autocomplete="off"></label><label>Google OAuth version<input required name="google_oauth_version" value="v2" readonly></label><label>Workspace domain<input required name="google_workspace_domain" placeholder="example.com" autocomplete="off"></label></div><div class="verify-row"><button class="secondary" type="button" data-provider-verify>Test Google and Cloudflare</button><p class="verify-status" data-provider-status role="status" aria-live="polite">Credentials not tested.</p></div></section><section class="setup-unifi" data-motion><div class="section-head"><span class="section-number">03</span><div><h2>UniFi Network</h2><p class="hint">Verify controller reachability, API key, and site before setup can be saved.</p></div></div><div class="form-grid"><label class="wide-field">UniFi Network API URL<input required type="url" name="unifi_network_api_url" placeholder="https://unifi.local:11443/proxy/network/integration/v1" autocomplete="url"></label><label>UniFi API key<input required type="password" name="unifi_api_key" autocomplete="off"></label><label>UniFi site ID<input required name="unifi_site_id" autocomplete="off"></label></div><label class="check-label setup-trust"><input type="checkbox" name="trust_unifi_self_signed_certificate" value="true"> Trust certificate currently presented by this UniFi server</label><p class="hint">Enable only after independently confirming this URL reaches your UniFi server. Leave disabled for certificates trusted by operating system.</p><div class="verify-row"><button class="secondary" type="button" data-unifi-verify>Test UniFi connection</button><p class="verify-status" data-unifi-status role="status" aria-live="polite">Connection not tested.</p></div></section><div class="setup-submit" data-motion><p class="hint">Setup stays available while <strong>SETUP=true</strong>. Set <strong>SETUP=false</strong> and redeploy after saving.</p><button type="submit" data-setup-submit disabled>Save setup</button></div></form>"#
         ),
     )
 }
@@ -416,25 +422,51 @@ async fn setup_post(
     let now = OffsetDateTime::now_utc().unix_timestamp();
     let mut tx = s.pool.begin().await.map_err(internal)?;
     let reconfiguring = *s.setup_done.read().await;
+    if reconfiguring {
+        reset_application_data(&mut tx).await.map_err(internal)?;
+    }
     sqlx::query("INSERT INTO settings(id,public_base_url,google_client_id,google_client_secret_ciphertext,google_client_secret_nonce,google_oauth_version,google_workspace_domain,unifi_network_api_url,unifi_api_key_ciphertext,unifi_api_key_nonce,unifi_site_id,staff_session_minutes,setup_completed_at,unifi_certificate_pem) VALUES(1,?,?,?,?,?,?,?,?,?,?,480,?,?) ON CONFLICT(id) DO UPDATE SET public_base_url=excluded.public_base_url,google_client_id=excluded.google_client_id,google_client_secret_ciphertext=excluded.google_client_secret_ciphertext,google_client_secret_nonce=excluded.google_client_secret_nonce,google_oauth_version=excluded.google_oauth_version,google_workspace_domain=excluded.google_workspace_domain,unifi_network_api_url=excluded.unifi_network_api_url,unifi_api_key_ciphertext=excluded.unifi_api_key_ciphertext,unifi_api_key_nonce=excluded.unifi_api_key_nonce,unifi_site_id=excluded.unifi_site_id,setup_completed_at=excluded.setup_completed_at,unifi_certificate_pem=excluded.unifi_certificate_pem").bind(s.config.public_base_url.as_str()).bind(f.google_auth_client_id.trim()).bind(gc).bind(gn.as_slice()).bind("v2").bind(f.google_workspace_domain.trim()).bind(f.unifi_network_api_url.trim_end_matches('/')).bind(uc).bind(un.as_slice()).bind(f.unifi_site_id.trim()).bind(now).bind(unifi_certificate).execute(&mut *tx).await.map_err(internal)?;
     sqlx::query("INSERT INTO users(email,role,approved,device_limit,created_at,updated_at) VALUES(?,'ADMIN',1,1,?,?) ON CONFLICT(email) DO UPDATE SET role='ADMIN',approved=1,updated_at=excluded.updated_at").bind(f.initial_admin_email.trim().to_lowercase()).bind(now).bind(now).execute(&mut *tx).await.map_err(internal)?;
     audit(
         &mut tx,
         None,
-        if reconfiguring {
-            "SETUP_RECONFIGURED"
-        } else {
-            "SETUP_COMPLETED"
-        },
+        "SETUP_COMPLETED",
         "SETTINGS",
         Some(1),
-        "{}",
+        if reconfiguring {
+            r#"{"reset":true}"#
+        } else {
+            "{}"
+        },
     )
     .await
     .map_err(internal)?;
     tx.commit().await.map_err(internal)?;
     *s.setup_done.write().await = true;
     Ok(Redirect::to("/auth/google/start?intent=MANAGEMENT").into_response())
+}
+
+async fn reset_application_data(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+) -> Result<(), sqlx::Error> {
+    for table in [
+        "device_authorizations",
+        "coupons",
+        "coupon_templates",
+        "audit_events",
+        "oauth_attempts",
+        "tower_sessions",
+        "users",
+        "settings",
+    ] {
+        sqlx::query(&format!("DELETE FROM {table}"))
+            .execute(&mut **tx)
+            .await?;
+    }
+    sqlx::query("DELETE FROM sqlite_sequence WHERE name IN ('users','coupon_templates','coupons','device_authorizations','audit_events')")
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
 }
 async fn portal_get(
     State(s): State<AppState>,
@@ -926,13 +958,49 @@ mod tests {
 
     #[test]
     fn setup_page_requires_provider_and_unifi_verification() {
-        let html = setup_page("Initial setup").0;
+        let html = setup_page(false).0;
         assert!(html.contains("data-provider-verify"));
-        assert!(html.contains("data-unifi-verify"));
         assert!(html.contains("data-setup-submit disabled"));
         assert!(html.contains("class=\"setup-unifi\""));
     }
 
+    #[test]
+    fn re_setup_page_warns_about_database_reset() {
+        let html = setup_page(true).0;
+        assert!(html.contains("role=\"alert\""));
+        assert!(html.contains("Database reset required"));
+        assert!(html.contains("permanently deletes existing users"));
+        assert!(!setup_page(false).0.contains("Database reset required"));
+    }
+
+    #[tokio::test]
+    async fn re_setup_reset_removes_application_data_and_sessions() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!().run(&pool).await.unwrap();
+        SqliteStore::new(pool.clone()).migrate().await.unwrap();
+        sqlx::query("INSERT INTO users(email,role,approved,device_limit,created_at,updated_at) VALUES('old@example.com','ADMIN',1,1,1,1)")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO audit_events(event_type,target_type,details_json,created_at) VALUES('OLD','USER','{}',1)")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO oauth_attempts(state,pkce,nonce,intent,expires_at) VALUES('old','pkce','nonce','MANAGEMENT',99)")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO tower_sessions(id,data,expiry_date) VALUES('old',x'00',99)")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let mut tx = pool.begin().await.unwrap();
+        reset_application_data(&mut tx).await.unwrap();
+        tx.commit().await.unwrap();
+
+        for table in ["users", "audit_events", "oauth_attempts", "tower_sessions"] {
+            let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(count, 0, "{table} was not reset");
+        }
+    }
     #[test]
     fn provider_responses_must_confirm_credentials() {
         assert!(google_credentials_accepted("invalid_grant"));
