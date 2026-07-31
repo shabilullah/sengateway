@@ -112,6 +112,7 @@
     const providerStatus = setupForm.querySelector('[data-provider-status]');
     const unifiButton = setupForm.querySelector('[data-unifi-verify]');
     const unifiStatus = setupForm.querySelector('[data-unifi-status]');
+    const unifiSite = setupForm.querySelector('[data-unifi-site]');
     const providerFields = [
       'passcode',
       'google_auth_client_id',
@@ -121,7 +122,6 @@
       'passcode',
       'unifi_network_api_url',
       'unifi_api_key',
-      'unifi_site_id',
       'trust_unifi_self_signed_certificate'
     ].map((name) => setupForm.elements.namedItem(name));
     let providersVerified = false;
@@ -138,6 +138,8 @@
     };
     const resetUnifi = () => {
       unifiVerified = false;
+      unifiSite.disabled = true;
+      unifiSite.replaceChildren(new Option('Test connection to load sites', ''));
       unifiStatus.className = 'verify-status';
       unifiStatus.textContent = 'Connection not tested.';
       updateSubmit();
@@ -146,6 +148,10 @@
     providerFields.forEach((field) => field.addEventListener('change', resetProviders));
     unifiFields.forEach((field) => field.addEventListener('input', resetUnifi));
     unifiFields.forEach((field) => field.addEventListener('change', resetUnifi));
+    unifiSite.addEventListener('change', () => {
+      unifiVerified = Boolean(unifiSite.value);
+      updateSubmit();
+    });
 
     const verify = async (button, status, fields, url, pending, failed, success) => {
       const missing = fields.filter((field) => field.type !== 'checkbox')
@@ -197,18 +203,46 @@
         () => { providersVerified = true; }
       );
     });
-    unifiButton.addEventListener('click', () => {
+    unifiButton.addEventListener('click', async () => {
       unifiVerified = false;
       updateSubmit();
-      verify(
-        unifiButton,
-        unifiStatus,
-        unifiFields,
-        '/setup/verify-unifi',
-        'Testing controller connection…',
-        'UniFi verification failed',
-        () => { unifiVerified = true; }
-      );
+      const missing = unifiFields.filter((field) => field.type !== 'checkbox')
+        .find((field) => !field.value.trim());
+      if (missing) {
+        missing.reportValidity();
+        missing.focus();
+        return;
+      }
+      unifiSite.disabled = true;
+      unifiSite.replaceChildren(new Option('Testing connection…', ''));
+      unifiButton.disabled = true;
+      unifiStatus.className = 'verify-status pending';
+      unifiStatus.textContent = 'Testing controller connection…';
+      const body = new URLSearchParams();
+      unifiFields.forEach((field) => {
+        if (field.type !== 'checkbox' || field.checked) body.set(field.name, field.value);
+      });
+      try {
+        const response = await fetch('/setup/verify-unifi', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+          body
+        });
+        if (!response.ok) throw new Error(await response.text() || 'UniFi verification failed');
+        const result = await response.json();
+        unifiSite.replaceChildren(new Option('Choose a site', ''));
+        result.sites.forEach((site) => unifiSite.add(new Option(`${site.name} — ${site.id}`, site.id)));
+        unifiSite.disabled = false;
+        unifiStatus.className = 'verify-status success';
+        unifiStatus.textContent = result.message;
+        unifiSite.focus();
+      } catch (error) {
+        resetUnifi();
+        unifiStatus.className = 'verify-status error';
+        unifiStatus.textContent = error.message;
+      } finally {
+        unifiButton.disabled = false;
+      }
     });
 
   }

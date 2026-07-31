@@ -81,7 +81,7 @@ caddy reverse-proxy --from https://localhost:8443 --to http://127.0.0.1:8080
 
 Trust Caddy local CA when browser prompts. Open `https://localhost:8443/setup` and enter `SETUP_PASSCODE` in form.
 
-Setup validates UniFi site immediately. Use real development UniFi endpoint, API key, and site ID. Google callback URI must be registered exactly as:
+Setup validates UniFi controller access and loads accessible sites for selection. Use real development UniFi controller URL and API key. Google callback URI must be registered exactly as:
 
 ```text
 https://localhost:8443/auth/google/callback
@@ -163,7 +163,7 @@ In Dockge, create stack, paste repository `compose.yaml`, then enter values from
 cp .env.example .env
 ```
 
-Required changes: `PORTAL_HOSTNAME`, private LAN `ORIGIN_BIND_IP`, restricted Cloudflare token, `SETUP=true`, and a random `SETUP_PASSCODE` containing at least 16 bytes. Enter full UniFi Network API URL later in WebUI setup; no UniFi hostname, IP, or CA path belongs in default Dockge environment.
+Required changes: `PORTAL_HOSTNAME`, private LAN `ORIGIN_BIND_IP`, restricted Cloudflare token, `SETUP=true`, and a random `SETUP_PASSCODE` containing at least 16 bytes. Enter UniFi controller HTTPS URL with optional port later in WebUI setup; app adds `/proxy/network/integration/v1` automatically. No UniFi hostname, IP, or CA path belongs in default Dockge environment.
 
 App generates session and setup-encryption secrets on first startup and stores them as mode `0600` files in persistent `app-data` volume beside SQLite data. Later starts reuse same values. No secret generation or Dockge entry is required for those generated secrets.
 
@@ -202,7 +202,7 @@ docker compose logs caddy
 curl --fail https://<PORTAL_HOSTNAME>/healthz
 ```
 
-Open `https://<PORTAL_HOSTNAME>/setup` from trusted on-site network. Enter `SETUP_PASSCODE`, administrator email, Google v2 credentials, exact lowercase Workspace domain, full UniFi Network API URL, UniFi API key, and site ID. After successful save, set `SETUP=false` and redeploy. To reconfigure later, temporarily set `SETUP=true`, redeploy, use same URL and passcode, then restore `SETUP=false`; existing users, coupons, authorizations, sessions, and audit history remain intact.
+Open `https://<PORTAL_HOSTNAME>/setup` from trusted on-site network. Enter `SETUP_PASSCODE`, administrator email, Google v2 credentials, exact lowercase Workspace domain, UniFi controller HTTPS URL, and UniFi API key. Test UniFi connection, then choose site by name and ID from returned list. After successful save, set `SETUP=false` and redeploy. To reconfigure later, temporarily set `SETUP=true`, redeploy, use same URL and passcode, then restore `SETUP=false`; saving re-setup resets existing application data as warned on setup page.
 
 ### 3. Operational verification
 

@@ -9,7 +9,7 @@ mod revoke;
 mod unifi;
 
 use axum::{
-    Form, Router,
+    Form, Json, Router,
     extract::{ConnectInfo, DefaultBodyLimit, Query, Request, State},
     http::{HeaderMap, StatusCode, header},
     middleware::{self, Next},
@@ -18,7 +18,7 @@ use axum::{
 };
 use config::Config;
 use secrecy::SecretString;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256, Sha512};
 use sqlx::{SqlitePool, sqlite::SqlitePoolOptions};
 use std::{
@@ -77,7 +77,6 @@ struct SetupUnifiForm {
     unifi_api_key: String,
     #[serde(default)]
     trust_unifi_self_signed_certificate: bool,
-    unifi_site_id: String,
 }
 
 #[derive(Deserialize)]
@@ -90,6 +89,11 @@ struct SetupGoogleForm {
 #[derive(Deserialize)]
 struct GoogleTokenError {
     error: String,
+}
+#[derive(Serialize)]
+struct SetupUnifiResponse {
+    message: &'static str,
+    sites: Vec<unifi::Site>,
 }
 
 type WebResult = Result<axum::response::Response, (StatusCode, &'static str)>;
@@ -241,7 +245,7 @@ async fn health(State(s): State<AppState>) -> impl IntoResponse {
 }
 
 fn scripts() -> &'static str {
-    r#"<script defer src="/static/anime.umd.min.js"></script><script defer src="/static/app.js"></script>"#
+    r#"<script defer src="/static/anime.umd.min.js"></script><script defer src="/static/app.js?v=site-discovery"></script>"#
 }
 fn page(title: &str, body: &str) -> Html<String> {
     Html(format!(
@@ -299,7 +303,7 @@ fn setup_page(reconfiguring: bool) -> Html<String> {
     page(
         "Setup",
         &format!(
-            r#"<div class="setup-head" data-motion><div><p class="eyebrow">Gateway configuration</p><h1>{heading}</h1><p>Connect identity and network services, then open control room.</p></div><span class="setup-step">Secure setup</span></div>{reset_notice}<form class="setup-form" method="post" data-setup-form><section data-motion><div class="section-head"><span class="section-number">01</span><div><h2>Setup access</h2><p class="hint">Confirm administrator and deployment passcode.</p></div></div><div class="form-grid"><label>Setup passcode<input required type="password" name="passcode" autocomplete="current-password"></label><label>Administrator email<input required type="email" name="initial_admin_email" autocomplete="email"></label></div></section><section data-motion><div class="section-head"><span class="section-number">02</span><div><h2>Google Workspace</h2><p class="hint">Verify Google OAuth credentials before saving.</p></div></div><div class="form-grid"><label>Google client ID<input required name="google_auth_client_id" autocomplete="off"></label><label>Google client secret<input required type="password" name="google_oauth_client_secret" autocomplete="off"></label><label>Google OAuth version<input required name="google_oauth_version" value="v2" readonly></label><label>Workspace domain<input required name="google_workspace_domain" placeholder="example.com" autocomplete="off"></label></div><div class="verify-row"><button class="secondary" type="button" data-provider-verify>Test Google OAuth</button><p class="verify-status" data-provider-status role="status" aria-live="polite">Credentials not tested.</p></div></section><section class="setup-unifi" data-motion><div class="section-head"><span class="section-number">03</span><div><h2>UniFi Network</h2><p class="hint">Verify controller reachability, API key, and site before setup can be saved.</p></div></div><div class="form-grid"><label class="wide-field">UniFi Network API URL<input required type="url" name="unifi_network_api_url" placeholder="https://unifi.local:11443/proxy/network/integration/v1" autocomplete="url"></label><label>UniFi API key<input required type="password" name="unifi_api_key" autocomplete="off"></label><label>UniFi site ID<input required name="unifi_site_id" autocomplete="off"></label></div><label class="check-label setup-trust"><input type="checkbox" name="trust_unifi_self_signed_certificate" value="true"> Trust certificate currently presented by this UniFi server</label><p class="hint">Enable only after independently confirming this URL reaches your UniFi server. Leave disabled for certificates trusted by operating system.</p><div class="verify-row"><button class="secondary" type="button" data-unifi-verify>Test UniFi connection</button><p class="verify-status" data-unifi-status role="status" aria-live="polite">Connection not tested.</p></div></section><div class="setup-submit" data-motion><p class="hint">Setup stays available while <strong>SETUP=true</strong>. Set <strong>SETUP=false</strong> and redeploy after saving.</p><button type="submit" data-setup-submit disabled>Save setup</button></div></form>"#
+            r#"<div class="setup-head" data-motion><div><p class="eyebrow">Gateway configuration</p><h1>{heading}</h1><p>Connect identity and network services, then open control room.</p></div><span class="setup-step">Secure setup</span></div>{reset_notice}<form class="setup-form" method="post" data-setup-form><section data-motion><div class="section-head"><span class="section-number">01</span><div><h2>Setup access</h2><p class="hint">Confirm administrator and deployment passcode.</p></div></div><div class="form-grid"><label>Setup passcode<input required type="password" name="passcode" autocomplete="current-password"></label><label>Administrator email<input required type="email" name="initial_admin_email" autocomplete="email"></label></div></section><section data-motion><div class="section-head"><span class="section-number">02</span><div><h2>Google Workspace</h2><p class="hint">Verify Google OAuth credentials before saving.</p></div></div><div class="form-grid"><label>Google client ID<input required name="google_auth_client_id" autocomplete="off"></label><label>Google client secret<input required type="password" name="google_oauth_client_secret" autocomplete="off"></label><label>Google OAuth version<input required name="google_oauth_version" value="v2" readonly></label><label>Workspace domain<input required name="google_workspace_domain" placeholder="example.com" autocomplete="off"></label></div><div class="verify-row"><button class="secondary" type="button" data-provider-verify>Test Google OAuth</button><p class="verify-status" data-provider-status role="status" aria-live="polite">Credentials not tested.</p></div></section><section class="setup-unifi" data-motion><div class="section-head"><span class="section-number">03</span><div><h2>UniFi Network</h2><p class="hint">Verify controller reachability and API key, then choose an accessible site.</p></div></div><div class="form-grid"><label class="wide-field">UniFi controller URL<input required type="url" name="unifi_network_api_url" placeholder="https://unifi.local:11443" autocomplete="url"></label><label>UniFi API key<input required type="password" name="unifi_api_key" autocomplete="off"></label><label>UniFi site<select required name="unifi_site_id" disabled data-unifi-site><option value="">Test connection to load sites</option></select></label></div><label class="check-label setup-trust"><input type="checkbox" name="trust_unifi_self_signed_certificate" value="true"> Trust certificate currently presented by this UniFi server</label><p class="hint">Enter only controller base URL and optional port. API path is added automatically. Trust certificate only after independently confirming this URL reaches your UniFi server.</p><div class="verify-row"><button class="secondary" type="button" data-unifi-verify>Test UniFi connection</button><p class="verify-status" data-unifi-status role="status" aria-live="polite">Connection not tested.</p></div></section><div class="setup-submit" data-motion><p class="hint">Setup stays available while <strong>SETUP=true</strong>. Set <strong>SETUP=false</strong> and redeploy after saving.</p><button type="submit" data-setup-submit disabled>Save setup</button></div></form>"#
         ),
     )
 }
@@ -346,14 +350,17 @@ async fn setup_verify_unifi(
     if !check_passcode(&s, &f.passcode, peer.ip()).await {
         return Err((StatusCode::UNAUTHORIZED, "invalid setup passcode"));
     }
-    verify_unifi(
+    let sites = discover_unifi_sites(
         &f.unifi_network_api_url,
         &f.unifi_api_key,
-        &f.unifi_site_id,
         f.trust_unifi_self_signed_certificate,
     )
     .await?;
-    Ok((StatusCode::OK, "UniFi connection verified").into_response())
+    Ok(Json(SetupUnifiResponse {
+        message: "UniFi connection verified. Choose a site.",
+        sites,
+    })
+    .into_response())
 }
 async fn setup_post(
     State(s): State<AppState>,
@@ -375,22 +382,20 @@ async fn setup_post(
         return Err((StatusCode::UNAUTHORIZED, "invalid setup passcode"));
     }
     validate_setup(&f)?;
+    let unifi_api_url = unifi_api_url(&f.unifi_network_api_url)?;
     verify_google(&f.google_auth_client_id, &f.google_oauth_client_secret).await?;
-    verify_unifi(
-        &f.unifi_network_api_url,
+    verify_unifi_api(
+        &unifi_api_url,
         &f.unifi_api_key,
         &f.unifi_site_id,
         f.trust_unifi_self_signed_certificate,
+        &f.unifi_network_api_url,
     )
     .await?;
-    let unifi_certificate = if f.trust_unifi_self_signed_certificate {
-        Some(
-            unifi::UnifiClient::capture_certificate(&f.unifi_network_api_url)
-                .map_err(|_| (StatusCode::BAD_REQUEST, "cannot read UniFi TLS certificate"))?,
-        )
-    } else {
-        None
-    };
+    let unifi_certificate = unifi_certificate(
+        &f.unifi_network_api_url,
+        f.trust_unifi_self_signed_certificate,
+    )?;
     let (gc, gn) = crypto::encrypt(
         &s.config.encryption_key,
         &SecretString::from(f.google_oauth_client_secret),
@@ -407,7 +412,7 @@ async fn setup_post(
     if reconfiguring {
         reset_application_data(&mut tx).await.map_err(internal)?;
     }
-    sqlx::query("INSERT INTO settings(id,public_base_url,google_client_id,google_client_secret_ciphertext,google_client_secret_nonce,google_oauth_version,google_workspace_domain,unifi_network_api_url,unifi_api_key_ciphertext,unifi_api_key_nonce,unifi_site_id,staff_session_minutes,setup_completed_at,unifi_certificate_pem) VALUES(1,?,?,?,?,?,?,?,?,?,?,480,?,?) ON CONFLICT(id) DO UPDATE SET public_base_url=excluded.public_base_url,google_client_id=excluded.google_client_id,google_client_secret_ciphertext=excluded.google_client_secret_ciphertext,google_client_secret_nonce=excluded.google_client_secret_nonce,google_oauth_version=excluded.google_oauth_version,google_workspace_domain=excluded.google_workspace_domain,unifi_network_api_url=excluded.unifi_network_api_url,unifi_api_key_ciphertext=excluded.unifi_api_key_ciphertext,unifi_api_key_nonce=excluded.unifi_api_key_nonce,unifi_site_id=excluded.unifi_site_id,setup_completed_at=excluded.setup_completed_at,unifi_certificate_pem=excluded.unifi_certificate_pem").bind(s.config.public_base_url.as_str()).bind(f.google_auth_client_id.trim()).bind(gc).bind(gn.as_slice()).bind("v2").bind(f.google_workspace_domain.trim()).bind(f.unifi_network_api_url.trim_end_matches('/')).bind(uc).bind(un.as_slice()).bind(f.unifi_site_id.trim()).bind(now).bind(unifi_certificate).execute(&mut *tx).await.map_err(internal)?;
+    sqlx::query("INSERT INTO settings(id,public_base_url,google_client_id,google_client_secret_ciphertext,google_client_secret_nonce,google_oauth_version,google_workspace_domain,unifi_network_api_url,unifi_api_key_ciphertext,unifi_api_key_nonce,unifi_site_id,staff_session_minutes,setup_completed_at,unifi_certificate_pem) VALUES(1,?,?,?,?,?,?,?,?,?,?,480,?,?) ON CONFLICT(id) DO UPDATE SET public_base_url=excluded.public_base_url,google_client_id=excluded.google_client_id,google_client_secret_ciphertext=excluded.google_client_secret_ciphertext,google_client_secret_nonce=excluded.google_client_secret_nonce,google_oauth_version=excluded.google_oauth_version,google_workspace_domain=excluded.google_workspace_domain,unifi_network_api_url=excluded.unifi_network_api_url,unifi_api_key_ciphertext=excluded.unifi_api_key_ciphertext,unifi_api_key_nonce=excluded.unifi_api_key_nonce,unifi_site_id=excluded.unifi_site_id,setup_completed_at=excluded.setup_completed_at,unifi_certificate_pem=excluded.unifi_certificate_pem").bind(s.config.public_base_url.as_str()).bind(f.google_auth_client_id.trim()).bind(gc).bind(gn.as_slice()).bind("v2").bind(f.google_workspace_domain.trim()).bind(&unifi_api_url).bind(uc).bind(un.as_slice()).bind(f.unifi_site_id.trim()).bind(now).bind(unifi_certificate).execute(&mut *tx).await.map_err(internal)?;
     sqlx::query("INSERT INTO users(email,role,approved,device_limit,created_at,updated_at) VALUES(?,'ADMIN',1,1,?,?) ON CONFLICT(email) DO UPDATE SET role='ADMIN',approved=1,updated_at=excluded.updated_at").bind(f.initial_admin_email.trim().to_lowercase()).bind(now).bind(now).execute(&mut *tx).await.map_err(internal)?;
     audit(
         &mut tx,
@@ -692,28 +697,48 @@ async fn verify_google(
     }
     Ok(())
 }
-
 fn google_credentials_accepted(error: &str) -> bool {
     error == "invalid_grant"
 }
 
-async fn verify_unifi(
-    url: &str,
+async fn discover_unifi_sites(
+    controller_url: &str,
+    api_key: &str,
+    trust_self_signed: bool,
+) -> Result<Vec<unifi::Site>, (StatusCode, &'static str)> {
+    if api_key.trim().is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "UniFi API key is required"));
+    }
+    let api_url = unifi_api_url(controller_url)?;
+    let certificate = unifi_certificate(controller_url, trust_self_signed)?;
+    let probe = unifi::UnifiClient::new(
+        api_url,
+        String::new(),
+        SecretString::from(api_key.to_owned()),
+        certificate.as_deref(),
+    )
+    .map_err(|_| (StatusCode::BAD_REQUEST, "invalid UniFi settings"))?;
+    let sites = probe.sites().await.map_err(unifi_setup_error)?;
+    if sites.is_empty() {
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            "UniFi API key has no accessible sites",
+        ));
+    }
+    Ok(sites)
+}
+
+async fn verify_unifi_api(
+    api_url: &str,
     api_key: &str,
     site_id: &str,
     trust_self_signed: bool,
+    controller_url: &str,
 ) -> Result<(), (StatusCode, &'static str)> {
-    validate_unifi_settings(url, api_key, site_id)?;
-    let certificate = if trust_self_signed {
-        Some(
-            unifi::UnifiClient::capture_certificate(url)
-                .map_err(|_| (StatusCode::BAD_REQUEST, "cannot read UniFi TLS certificate"))?,
-        )
-    } else {
-        None
-    };
+    validate_unifi_credentials(api_key, site_id)?;
+    let certificate = unifi_certificate(controller_url, trust_self_signed)?;
     let probe = unifi::UnifiClient::new(
-        url.into(),
+        api_url.into(),
         site_id.into(),
         SecretString::from(api_key.to_owned()),
         certificate.as_deref(),
@@ -722,8 +747,44 @@ async fn verify_unifi(
     probe.site_check().await.map_err(unifi_setup_error)
 }
 
-fn validate_unifi_settings(
-    url: &str,
+fn unifi_certificate(
+    controller_url: &str,
+    trust_self_signed: bool,
+) -> Result<Option<Vec<u8>>, (StatusCode, &'static str)> {
+    trust_self_signed
+        .then(|| {
+            unifi::UnifiClient::capture_certificate(controller_url)
+                .map_err(|_| (StatusCode::BAD_REQUEST, "cannot read UniFi TLS certificate"))
+        })
+        .transpose()
+}
+
+fn unifi_api_url(controller_url: &str) -> Result<String, (StatusCode, &'static str)> {
+    let mut url = url::Url::parse(controller_url)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "UniFi controller URL is invalid"))?;
+    if url.scheme() != "https" {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "UniFi controller URL must use HTTPS",
+        ));
+    }
+    if url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || url.path() != "/"
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "UniFi controller URL must contain only host and optional port",
+        ));
+    }
+    url.set_path("/proxy/network/integration/v1");
+    Ok(url.to_string().trim_end_matches('/').into())
+}
+
+fn validate_unifi_credentials(
     api_key: &str,
     site_id: &str,
 ) -> Result<(), (StatusCode, &'static str)> {
@@ -731,12 +792,7 @@ fn validate_unifi_settings(
         return Err((StatusCode::BAD_REQUEST, "UniFi API key is required"));
     }
     if site_id.trim().is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "UniFi site ID is required"));
-    }
-    let url =
-        url::Url::parse(url).map_err(|_| (StatusCode::BAD_REQUEST, "UniFi API URL is invalid"))?;
-    if url.scheme() != "https" {
-        return Err((StatusCode::BAD_REQUEST, "UniFi API URL must use HTTPS"));
+        return Err((StatusCode::BAD_REQUEST, "Choose a UniFi site"));
     }
     Ok(())
 }
@@ -778,7 +834,8 @@ fn validate_setup(f: &SetupForm) -> Result<(), (StatusCode, &'static str)> {
     if !f.initial_admin_email.contains('@') {
         return Err((StatusCode::BAD_REQUEST, "Initial admin email is invalid"));
     }
-    validate_unifi_settings(&f.unifi_network_api_url, &f.unifi_api_key, &f.unifi_site_id)
+    unifi_api_url(&f.unifi_network_api_url)?;
+    validate_unifi_credentials(&f.unifi_api_key, &f.unifi_site_id)
 }
 async fn check_passcode(s: &AppState, passcode: &str, ip: IpAddr) -> bool {
     let now = OffsetDateTime::now_utc().unix_timestamp();
@@ -885,7 +942,7 @@ mod tests {
             google_oauth_client_secret: "secret".into(),
             google_oauth_version: "v2".into(),
             google_workspace_domain: "example.com".into(),
-            unifi_network_api_url: "https://unifi.example.com/integration/v1".into(),
+            unifi_network_api_url: "https://unifi.example.com:11443".into(),
             unifi_api_key: "key".into(),
             trust_unifi_self_signed_certificate: false,
             unifi_site_id: "site-id".into(),
@@ -906,6 +963,38 @@ mod tests {
         );
     }
 
+    #[test]
+    fn controller_url_derives_unifi_api_base() {
+        assert_eq!(
+            unifi_api_url("https://unifi.example.com:11443").unwrap(),
+            "https://unifi.example.com:11443/proxy/network/integration/v1"
+        );
+        assert!(unifi_api_url("http://unifi.example.com").is_err());
+        assert!(unifi_api_url("https://unifi.example.com/proxy/network/integration/v1").is_err());
+        assert!(unifi_api_url("https://user:secret@unifi.example.com").is_err());
+    }
+
+    #[test]
+    fn setup_page_loads_discovered_site_selector() {
+        let html = setup_page(false).0;
+        assert!(html.contains("placeholder=\"https://unifi.local:11443\""));
+        assert!(html.contains("select required name=\"unifi_site_id\" disabled data-unifi-site"));
+        assert!(!html.contains("UniFi site ID<input"));
+    }
+
+    #[test]
+    fn unifi_verification_response_includes_site_id_and_name() {
+        let response = serde_json::to_value(SetupUnifiResponse {
+            message: "UniFi connection verified. Choose a site.",
+            sites: vec![unifi::Site {
+                id: "site-id".into(),
+                name: "Main Office".into(),
+            }],
+        })
+        .unwrap();
+        assert_eq!(response["sites"][0]["id"], "site-id");
+        assert_eq!(response["sites"][0]["name"], "Main Office");
+    }
     #[test]
     fn setup_page_requires_provider_and_unifi_verification() {
         let html = setup_page(false).0;

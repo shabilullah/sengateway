@@ -40,12 +40,15 @@ struct Page {
 #[derive(Deserialize)]
 struct SitesPage {
     #[serde(default)]
-    data: Vec<SiteRecord>,
+    data: Vec<Site>,
+    #[serde(rename = "totalCount")]
+    total_count: Option<usize>,
 }
 
-#[derive(Deserialize)]
-struct SiteRecord {
-    id: String,
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct Site {
+    pub id: String,
+    pub name: String,
 }
 #[derive(Serialize)]
 struct Action<'a> {
@@ -126,20 +129,33 @@ impl UnifiClient {
             .request(method, url)
             .header("X-API-Key", self.key.expose_secret())
     }
+    pub async fn sites(&self) -> Result<Vec<Site>, UnifiError> {
+        const LIMIT: usize = 200;
+        let mut sites = Vec::new();
+        loop {
+            let r = self
+                .request(reqwest::Method::GET, format!("{}/sites", self.base))
+                .query(&[("offset", sites.len()), ("limit", LIMIT)])
+                .send()
+                .await
+                .map_err(|_| UnifiError::Request)?;
+            let page: SitesPage = self
+                .accept(r)
+                .await?
+                .json()
+                .await
+                .map_err(|_| UnifiError::Request)?;
+            let page_len = page.data.len();
+            sites.extend(page.data);
+            if page_len == 0 || page.total_count.is_none_or(|total| sites.len() >= total) {
+                return Ok(sites);
+            }
+        }
+    }
+
     pub async fn site_check(&self) -> Result<(), UnifiError> {
-        let r = self
-            .request(reqwest::Method::GET, format!("{}/sites", self.base))
-            .send()
-            .await
-            .map_err(|_| UnifiError::Request)?;
-        let sites: SitesPage = self
-            .accept(r)
+        self.sites()
             .await?
-            .json()
-            .await
-            .map_err(|_| UnifiError::Request)?;
-        sites
-            .data
             .iter()
             .any(|site| site.id == self.site)
             .then_some(())
@@ -354,7 +370,10 @@ mod tests {
             .and(path("/sites"))
             .and(header("X-API-Key", "key"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "data": [{"id": "wanted-site"}, {"id": "other-site"}]
+                "data": [
+                    {"id": "wanted-site", "name": "Main Office"},
+                    {"id": "other-site", "name": "Warehouse"}
+                ]
             })))
             .mount(&server)
             .await;
@@ -369,6 +388,65 @@ mod tests {
         client.site_check().await.unwrap();
     }
 
+    #[tokio::test]
+    async fn sites_returns_ids_and_network_names() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/sites"))
+            .and(wiremock::matchers::query_param("offset", "0"))
+            .and(wiremock::matchers::query_param("limit", "200"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [
+                    {"id": "main-id", "name": "Main Office"},
+                    {"id": "branch-id", "name": "Branch Network"}
+                ]
+            })))
+            .mount(&server)
+            .await;
+        let client =
+            UnifiClient::new(server.uri(), String::new(), SecretString::from("key"), None).unwrap();
+
+        assert_eq!(
+            client.sites().await.unwrap(),
+            vec![
+                Site {
+                    id: "main-id".into(),
+                    name: "Main Office".into()
+                },
+                Site {
+                    id: "branch-id".into(),
+                    name: "Branch Network".into()
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn sites_fetches_every_page() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/sites"))
+            .and(wiremock::matchers::query_param("offset", "0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "totalCount": 2,
+                "data": [{"id": "main-id", "name": "Main Office"}]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/sites"))
+            .and(wiremock::matchers::query_param("offset", "1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "totalCount": 2,
+                "data": [{"id": "branch-id", "name": "Branch Network"}]
+            })))
+            .mount(&server)
+            .await;
+        let client =
+            UnifiClient::new(server.uri(), String::new(), SecretString::from("key"), None).unwrap();
+
+        assert_eq!(client.sites().await.unwrap().len(), 2);
+    }
     #[tokio::test]
     async fn authorize_without_duration_omits_time_limit() {
         let server = MockServer::start().await;
