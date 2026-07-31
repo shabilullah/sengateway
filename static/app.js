@@ -191,9 +191,9 @@
         providerButton,
         providerStatus,
         providerFields,
-        '/setup/verify-providers',
-        'Testing Google and Cloudflare credentials…',
-        'Provider verification failed',
+        '/setup/verify-google',
+        'Testing Google OAuth credentials…',
+        'Google OAuth verification failed',
         () => { providersVerified = true; }
       );
     });

@@ -135,7 +135,6 @@ podman run -d \
     --volume "$APP_VOLUME:/data" \
     --secret "$SESSION_SECRET_NAME,type=env,target=SESSION_SECRET" \
     --secret "$ENCRYPTION_SECRET_NAME,type=env,target=SETUP_ENCRYPTION_KEY" \
-    --secret "$CLOUDFLARE_SECRET_NAME,type=env,target=CLOUDFLARE_API_TOKEN" \
     --health-cmd 'curl -fsS http://127.0.0.1:8080/healthz' \
     --health-interval 30s \
     --health-timeout 5s \

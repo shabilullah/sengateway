@@ -16,7 +16,6 @@ pub struct Config {
     pub trusted_proxy_ip: IpAddr,
     pub setup_enabled: bool,
     pub setup_passcode_hash: [u8; 32],
-    pub cloudflare_api_token: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -166,9 +165,6 @@ impl Config {
             }
         });
         let setup_enabled = boolean("SETUP", &mut errors);
-        let cloudflare_api_token = env::var("CLOUDFLARE_API_TOKEN")
-            .ok()
-            .filter(|value| !value.trim().is_empty());
         let setup_passcode_hash = get("SETUP_PASSCODE", &mut errors).and_then(|value| {
             if value.len() >= 16 {
                 Some(sha2::Sha256::digest(value.as_bytes()).into())
@@ -186,7 +182,6 @@ impl Config {
                 cookie_secure: cookie_secure.unwrap(),
                 trusted_proxy_ip: trusted_proxy_ip.unwrap(),
                 setup_enabled: setup_enabled.unwrap(),
-                cloudflare_api_token,
                 setup_passcode_hash: setup_passcode_hash.unwrap(),
             })
         } else {

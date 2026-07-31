@@ -81,7 +81,7 @@ struct SetupUnifiForm {
 }
 
 #[derive(Deserialize)]
-struct SetupProviderForm {
+struct SetupGoogleForm {
     passcode: String,
     google_auth_client_id: String,
     google_oauth_client_secret: String,
@@ -90,17 +90,6 @@ struct SetupProviderForm {
 #[derive(Deserialize)]
 struct GoogleTokenError {
     error: String,
-}
-
-#[derive(Deserialize)]
-struct CloudflareTokenResult {
-    success: bool,
-    result: Option<CloudflareTokenStatus>,
-}
-
-#[derive(Deserialize)]
-struct CloudflareTokenStatus {
-    status: String,
 }
 
 type WebResult = Result<axum::response::Response, (StatusCode, &'static str)>;
@@ -153,7 +142,7 @@ async fn main() {
         .route("/brand/logo", get(brand_logo))
         .route("/setup", get(setup_get).post(setup_post))
         .route("/setup/verify-unifi", post(setup_verify_unifi))
-        .route("/setup/verify-providers", post(setup_verify_providers))
+        .route("/setup/verify-google", post(setup_verify_google))
         .route("/portal", get(portal_get))
         .route("/portal/authorize", get(staff_authorize))
         .route("/coupon/redeem", post(coupon_redeem))
@@ -307,16 +296,16 @@ fn setup_page(reconfiguring: bool) -> Html<String> {
     page(
         "Setup",
         &format!(
-            r#"<div class="setup-head" data-motion><div><p class="eyebrow">Gateway configuration</p><h1>{heading}</h1><p>Connect identity and network services, then open control room.</p></div><span class="setup-step">Secure setup</span></div>{reset_notice}<form class="setup-form" method="post" data-setup-form><section data-motion><div class="section-head"><span class="section-number">01</span><div><h2>Setup access</h2><p class="hint">Confirm administrator and deployment passcode.</p></div></div><div class="form-grid"><label>Setup passcode<input required type="password" name="passcode" autocomplete="current-password"></label><label>Administrator email<input required type="email" name="initial_admin_email" autocomplete="email"></label></div></section><section data-motion><div class="section-head"><span class="section-number">02</span><div><h2>Google Workspace and Cloudflare</h2><p class="hint">Verify Google OAuth credentials and deployment Cloudflare API token before saving.</p></div></div><div class="form-grid"><label>Google client ID<input required name="google_auth_client_id" autocomplete="off"></label><label>Google client secret<input required type="password" name="google_oauth_client_secret" autocomplete="off"></label><label>Google OAuth version<input required name="google_oauth_version" value="v2" readonly></label><label>Workspace domain<input required name="google_workspace_domain" placeholder="example.com" autocomplete="off"></label></div><div class="verify-row"><button class="secondary" type="button" data-provider-verify>Test Google and Cloudflare</button><p class="verify-status" data-provider-status role="status" aria-live="polite">Credentials not tested.</p></div></section><section class="setup-unifi" data-motion><div class="section-head"><span class="section-number">03</span><div><h2>UniFi Network</h2><p class="hint">Verify controller reachability, API key, and site before setup can be saved.</p></div></div><div class="form-grid"><label class="wide-field">UniFi Network API URL<input required type="url" name="unifi_network_api_url" placeholder="https://unifi.local:11443/proxy/network/integration/v1" autocomplete="url"></label><label>UniFi API key<input required type="password" name="unifi_api_key" autocomplete="off"></label><label>UniFi site ID<input required name="unifi_site_id" autocomplete="off"></label></div><label class="check-label setup-trust"><input type="checkbox" name="trust_unifi_self_signed_certificate" value="true"> Trust certificate currently presented by this UniFi server</label><p class="hint">Enable only after independently confirming this URL reaches your UniFi server. Leave disabled for certificates trusted by operating system.</p><div class="verify-row"><button class="secondary" type="button" data-unifi-verify>Test UniFi connection</button><p class="verify-status" data-unifi-status role="status" aria-live="polite">Connection not tested.</p></div></section><div class="setup-submit" data-motion><p class="hint">Setup stays available while <strong>SETUP=true</strong>. Set <strong>SETUP=false</strong> and redeploy after saving.</p><button type="submit" data-setup-submit disabled>Save setup</button></div></form>"#
+            r#"<div class="setup-head" data-motion><div><p class="eyebrow">Gateway configuration</p><h1>{heading}</h1><p>Connect identity and network services, then open control room.</p></div><span class="setup-step">Secure setup</span></div>{reset_notice}<form class="setup-form" method="post" data-setup-form><section data-motion><div class="section-head"><span class="section-number">01</span><div><h2>Setup access</h2><p class="hint">Confirm administrator and deployment passcode.</p></div></div><div class="form-grid"><label>Setup passcode<input required type="password" name="passcode" autocomplete="current-password"></label><label>Administrator email<input required type="email" name="initial_admin_email" autocomplete="email"></label></div></section><section data-motion><div class="section-head"><span class="section-number">02</span><div><h2>Google Workspace</h2><p class="hint">Verify Google OAuth credentials before saving.</p></div></div><div class="form-grid"><label>Google client ID<input required name="google_auth_client_id" autocomplete="off"></label><label>Google client secret<input required type="password" name="google_oauth_client_secret" autocomplete="off"></label><label>Google OAuth version<input required name="google_oauth_version" value="v2" readonly></label><label>Workspace domain<input required name="google_workspace_domain" placeholder="example.com" autocomplete="off"></label></div><div class="verify-row"><button class="secondary" type="button" data-provider-verify>Test Google OAuth</button><p class="verify-status" data-provider-status role="status" aria-live="polite">Credentials not tested.</p></div></section><section class="setup-unifi" data-motion><div class="section-head"><span class="section-number">03</span><div><h2>UniFi Network</h2><p class="hint">Verify controller reachability, API key, and site before setup can be saved.</p></div></div><div class="form-grid"><label class="wide-field">UniFi Network API URL<input required type="url" name="unifi_network_api_url" placeholder="https://unifi.local:11443/proxy/network/integration/v1" autocomplete="url"></label><label>UniFi API key<input required type="password" name="unifi_api_key" autocomplete="off"></label><label>UniFi site ID<input required name="unifi_site_id" autocomplete="off"></label></div><label class="check-label setup-trust"><input type="checkbox" name="trust_unifi_self_signed_certificate" value="true"> Trust certificate currently presented by this UniFi server</label><p class="hint">Enable only after independently confirming this URL reaches your UniFi server. Leave disabled for certificates trusted by operating system.</p><div class="verify-row"><button class="secondary" type="button" data-unifi-verify>Test UniFi connection</button><p class="verify-status" data-unifi-status role="status" aria-live="polite">Connection not tested.</p></div></section><div class="setup-submit" data-motion><p class="hint">Setup stays available while <strong>SETUP=true</strong>. Set <strong>SETUP=false</strong> and redeploy after saving.</p><button type="submit" data-setup-submit disabled>Save setup</button></div></form>"#
         ),
     )
 }
 
-async fn setup_verify_providers(
+async fn setup_verify_google(
     State(s): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
-    Form(f): Form<SetupProviderForm>,
+    Form(f): Form<SetupGoogleForm>,
 ) -> WebResult {
     trusted(
         &s,
@@ -331,13 +320,8 @@ async fn setup_verify_providers(
     if !check_passcode(&s, &f.passcode, peer.ip()).await {
         return Err((StatusCode::UNAUTHORIZED, "invalid setup passcode"));
     }
-    verify_providers(
-        &f.google_auth_client_id,
-        &f.google_oauth_client_secret,
-        s.config.cloudflare_api_token.as_deref(),
-    )
-    .await?;
-    Ok((StatusCode::OK, "Google and Cloudflare credentials verified").into_response())
+    verify_google(&f.google_auth_client_id, &f.google_oauth_client_secret).await?;
+    Ok((StatusCode::OK, "Google OAuth credentials verified").into_response())
 }
 
 async fn setup_verify_unifi(
@@ -388,12 +372,7 @@ async fn setup_post(
         return Err((StatusCode::UNAUTHORIZED, "invalid setup passcode"));
     }
     validate_setup(&f)?;
-    verify_providers(
-        &f.google_auth_client_id,
-        &f.google_oauth_client_secret,
-        s.config.cloudflare_api_token.as_deref(),
-    )
-    .await?;
+    verify_google(&f.google_auth_client_id, &f.google_oauth_client_secret).await?;
     verify_unifi(
         &f.unifi_network_api_url,
         &f.unifi_api_key,
@@ -670,10 +649,9 @@ async fn fallback(State(s): State<AppState>) -> impl IntoResponse {
         (StatusCode::NOT_FOUND, "not found")
     }
 }
-async fn verify_providers(
+async fn verify_google(
     google_client_id: &str,
     google_client_secret: &str,
-    cloudflare_api_token: Option<&str>,
 ) -> Result<(), (StatusCode, &'static str)> {
     if google_client_id.trim().is_empty() || google_client_secret.trim().is_empty() {
         return Err((
@@ -709,42 +687,11 @@ async fn verify_providers(
             "Google OAuth credentials were rejected",
         ));
     }
-
-    let cloudflare_api_token = cloudflare_api_token.ok_or((
-        StatusCode::BAD_REQUEST,
-        "Cloudflare API token is missing from deployment environment",
-    ))?;
-    let cloudflare = client
-        .get("https://api.cloudflare.com/client/v4/user/tokens/verify")
-        .bearer_auth(cloudflare_api_token)
-        .send()
-        .await
-        .map_err(|_| (StatusCode::BAD_GATEWAY, "Could not contact Cloudflare"))?;
-    let token = cloudflare
-        .json::<CloudflareTokenResult>()
-        .await
-        .map_err(|_| {
-            (
-                StatusCode::BAD_GATEWAY,
-                "Cloudflare returned an unexpected response",
-            )
-        })?;
-    if !cloudflare_token_active(&token) {
-        return Err((StatusCode::BAD_GATEWAY, "Cloudflare API token was rejected"));
-    }
     Ok(())
 }
 
 fn google_credentials_accepted(error: &str) -> bool {
     error == "invalid_grant"
-}
-
-fn cloudflare_token_active(token: &CloudflareTokenResult) -> bool {
-    token.success
-        && token
-            .result
-            .as_ref()
-            .is_some_and(|result| result.status == "active")
 }
 
 async fn verify_unifi(
@@ -1002,21 +949,9 @@ mod tests {
         }
     }
     #[test]
-    fn provider_responses_must_confirm_credentials() {
+    fn google_response_must_confirm_credentials() {
         assert!(google_credentials_accepted("invalid_grant"));
         assert!(!google_credentials_accepted("invalid_client"));
-        assert!(cloudflare_token_active(&CloudflareTokenResult {
-            success: true,
-            result: Some(CloudflareTokenStatus {
-                status: "active".into(),
-            }),
-        }));
-        assert!(!cloudflare_token_active(&CloudflareTokenResult {
-            success: true,
-            result: Some(CloudflareTokenStatus {
-                status: "disabled".into(),
-            }),
-        }));
     }
     #[test]
     fn setup_passcode_comparison_is_exact() {
