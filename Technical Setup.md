@@ -63,22 +63,51 @@ Expected page is gateway page at `https://<PORTAL_HOSTNAME>/`, not UniFi-designe
 
 ### Pre-Authorization Allowances
 
-Permit these before authentication:
+Permit portal and Google browser sign-in destinations before authentication:
 
 ```text
 <PORTAL_IPV4>
 <PORTAL_HOSTNAME>
 accounts.google.com
-oauth2.googleapis.com
+www.gstatic.com
+ssl.gstatic.com
+fonts.gstatic.com
+accounts.gstatic.com
+lh3.googleusercontent.com
+accounts.youtube.com
+play.google.com
+www.google.com
+www.googleapis.com
 ```
 
-Also permit:
+This list combines Google official sign-in guidance with hosts observed during this gateway OAuth page load. `oauth2.googleapis.com` is used by gateway server after callback; guest browser does not need direct pre-authorization access to it.
 
-- DNS to approved resolvers.
-- TCP/443 to `<PORTAL_IPV4>`.
-- Google static hosts observed during real Workspace login if guest policy blocks them.
+Also permit DNS to approved resolvers and TCP/443 to `<PORTAL_IPV4>`. Do not broadly allow private networks. Keep guest LAN isolated and block other private destinations.
 
-Do not broadly allow private networks. Keep guest LAN isolated and block other private destinations.
+#### Google Prompt two-factor approval
+
+If approval phone uses mobile data or another authenticated network, no additional captive-portal allowances are needed for phone. If Android approval phone is on same unauthenticated SSID, Google Prompt depends on Firebase Cloud Messaging. Permit direct outbound TCP/443 and TCP/5228-5230 to:
+
+```text
+mtalk.google.com
+mtalk4.google.com
+mtalk-staging.google.com
+mtalk-dev.google.com
+alt1-mtalk.google.com
+alt2-mtalk.google.com
+alt3-mtalk.google.com
+alt4-mtalk.google.com
+alt5-mtalk.google.com
+alt6-mtalk.google.com
+alt7-mtalk.google.com
+alt8-mtalk.google.com
+android.apis.google.com
+device-provisioning.googleapis.com
+firebaseinstallations.googleapis.com
+fcm.googleapis.com
+```
+
+FCM must connect directly; do not proxy or TLS-inspect these destinations. If UniFi pre-authorization allowances cannot express ports or wildcard Google endpoints reliably, move approval phone to mobile data while approving, or use another configured factor such as authenticator code or security key. Never broadly pre-authorize all Internet access merely to make Google Prompt work.
 
 ### Expected redirect
 
@@ -292,12 +321,14 @@ Generate API key under **UniFi Network > Control Plane > Integrations**.
 Gateway setup values:
 
 ```text
-UniFi Network API URL:
-https://<UNIFI_HOSTNAME>:<UNIFI_PORT>/proxy/network/integration/v1
+UniFi controller URL:
+https://<UNIFI_HOSTNAME>:<UNIFI_PORT>
 
-UniFi site ID:
-<UNIFI_SITE_ID>
+UniFi API key:
+<UNIFI_API_KEY>
 ```
+
+Gateway appends `/proxy/network/integration/v1`, fetches every accessible site from `GET /sites`, and displays site name plus ID for selection. Do not enter API path or site ID manually.
 
 ### Private UniFi hostname and certificate
 
@@ -346,11 +377,59 @@ openssl s_client \
 
 Do not enable based only on certificate captured across untrusted network. Alternative: configure UniFi OS with certificate from trusted CA and leave checkbox disabled.
 
-#### 3. Provide hostname inside container
+#### 3. Provide hostname inside app container
 
-Preferred: organization DNS resolves `<UNIFI_HOSTNAME>` to `<UNIFI_IPV4>` from container network.
+Preferred: organization DNS resolves `<UNIFI_HOSTNAME>` to `<UNIFI_IPV4>` from app container network. Host resolution alone is insufficient: `<UNIFI_HOSTNAME>` must exactly match controller certificate SAN.
 
-For host-only mapping with Podman pod, add mapping when creating pod because containers share pod network namespace:
+Podman/netavark custom networks may give container embedded DNS such as `172.28.0.1`. This resolver can resolve public names while failing private split-horizon records available through LAN resolver. Typical setup errors are:
+
+```text
+Could not establish a trusted TLS connection to UniFi
+Could not capture UniFi TLS certificate
+```
+
+Confirm root cause inside Dockge `app` service console:
+
+```sh
+cat /etc/resolv.conf
+getent hosts <UNIFI_HOSTNAME>
+curl -v https://<UNIFI_HOSTNAME>:<UNIFI_PORT>/proxy/network/integration/v1/sites
+```
+
+Expected `getent` output contains `<UNIFI_IPV4>`. Expected unauthenticated `curl` response is HTTP `401`; that proves DNS, TCP, hostname verification, certificate trust, TLS, and API path work. `Could not resolve host` or empty `getent` output is DNS failure, not certificate failure.
+
+For Dockge stack where embedded Podman DNS does not return private record, add exact certificate hostname mapping to `app` service:
+
+```yaml
+services:
+  app:
+    extra_hosts:
+      - <UNIFI_HOSTNAME>:<UNIFI_IPV4>
+```
+
+Example:
+
+```yaml
+services:
+  app:
+    extra_hosts:
+      - unifi.example.com:192.168.50.10
+```
+
+Do not map only alias such as `unifi.local` when setup URL and certificate use `unifi.example.com`; mappings are exact hostname matches. Do not use controller IP in setup URL when certificate covers hostname.
+
+Save and redeploy through Dockge so Compose recreates `app` with persistent `/etc/hosts` entry. Do not edit container `/etc/hosts` directly except temporary diagnosis; change disappears on recreation. Verify after redeploy:
+
+```sh
+getent hosts <UNIFI_HOSTNAME>
+curl -v https://<UNIFI_HOSTNAME>:<UNIFI_PORT>/proxy/network/integration/v1/sites
+```
+
+If controller uses publicly trusted certificate, leave **Trust certificate currently presented by this UniFi server** disabled. Enable it only for independently verified self-signed certificate; DNS must work in either mode because certificate capture also resolves hostname.
+
+If `/healthz` remains HTTP `503` after DNS repair, database may still contain old UniFi hostname from prior setup. Temporarily set `SETUP=true`, redeploy through Dockge, re-run setup with working controller base URL, select discovered site, save, then restore `SETUP=false` and redeploy. Do not edit SQLite directly.
+
+For host-only mapping with Podman pod deployment outside Dockge, add mapping when creating pod because containers share pod network namespace:
 
 ```sh
 podman pod create \
@@ -360,10 +439,10 @@ podman pod create \
   --publish <PORTAL_IPV4>:443:443
 ```
 
-Default Compose/Dockge stack needs no UniFi hostname or IP variable. During one-time WebUI setup, enter full API URL whose hostname resolves from container and matches controller certificate SAN:
+During WebUI setup enter only controller base URL:
 
 ```text
-https://unifi.example.com:443/proxy/network/integration/v1
+https://<UNIFI_HOSTNAME>:<UNIFI_PORT>
 ```
 
 Publicly trusted certificate uses image OS CA store automatically.
@@ -372,6 +451,7 @@ Publicly trusted certificate uses image OS CA store automatically.
 
 Certificate checkbox is portable default for verified self-signed UniFi. Administrator-supplied private CA remains optional deployment override through `UNIFI_CA_CERT_PATH`; see app runtime configuration when centralized CA management is required.
 Default `compose.yaml` needs no CA file. Setup persists optional pinned certificate in SQLite after explicit consent and successful strict verification. Gateway never disables TLS verification. It uses official `AUTHORIZE_GUEST_ACCESS` and `UNAUTHORIZE_GUEST_ACCESS` actions; do not use legacy `/api/s/{site}/cmd/stamgr` endpoints.
+
 ## Operations
 
 ### Health
@@ -430,7 +510,11 @@ Page lacks UniFi client context. Connect device to guest SSID and let UniFi redi
 
 ### Google login fails before account selection
 
-Allow `accounts.google.com`, `oauth2.googleapis.com`, and required Google static hosts in pre-authorization allowances. Confirm callback URI exactly matches Google Cloud configuration.
+Allow browser sign-in hosts listed under **Pre-Authorization Allowances**. Confirm callback URI exactly matches Google Cloud configuration. `oauth2.googleapis.com` is server-side and does not fix browser page loading.
+
+### Google Prompt approval completes but browser does not continue
+
+First move approval phone to mobile data. If browser then completes, phone was blocked from FCM on unauthenticated SSID; add Google Prompt FCM destinations and TCP/5228-5230 listed above. If phone receives prompt and approval succeeds but login browser still stalls, inspect blocked destinations from browser device and confirm `accounts.google.com`, `www.gstatic.com`, `accounts.youtube.com`, `play.google.com`, and `lh3.googleusercontent.com` are pre-authorized. Google changes sign-in assets over time; allow only observed Google destinations, then retest.
 
 ### Login says account is not enabled
 
