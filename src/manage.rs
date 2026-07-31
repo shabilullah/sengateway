@@ -219,9 +219,9 @@ pub async fn issue(
             format!("Expires <time data-unix=\"{expires}\">{expires}</time>")
         }
     );
-    let cards = codes.iter().map(|code| format!(r#"<section class="coupon" data-motion><p class="eyebrow">Ready to use</p><h2>{}</h2><p class="code">{}</p><p>{policy}</p></section>"#, crate::html(t.get("name")), crate::html(code))).collect::<String>();
+    let cards = codes.iter().map(|code| format!(r#"<section class="coupon" data-motion data-voucher><p class="eyebrow">Ready to use</p><h2>{}</h2><p class="code">{}</p><p>{policy}</p></section>"#, crate::html(t.get("name")), crate::html(code))).collect::<String>();
     let body = format!(
-        r#"<div class="page-head no-print" data-motion><div><p class="eyebrow">Batch complete</p><h1>{} coupon{}.</h1><p>Codes remain available on Coupons page.</p></div><div class="actions"><a class="button secondary" href="/manage">Issue more</a><button type="button" data-print>Print</button></div></div><div class="coupon-grid">{cards}</div>"#,
+        r#"<div class="page-head no-print" data-motion><div><p class="eyebrow">Batch complete</p><h1>{} coupon{}.</h1><p>Codes remain available on Coupons page.</p></div><div class="actions"><a class="button secondary" href="/manage">Issue more</a><button type="button" data-export-vouchers>Export CSV</button><button type="button" data-print>Print</button></div></div><div class="coupon-grid">{cards}</div>"#,
         f.quantity,
         if f.quantity == 1 { "" } else { "s" }
     );
@@ -760,12 +760,13 @@ mod tests {
             "Issued",
             "manage",
             "token",
-            r#"<button data-print>Print</button>"#,
+            r#"<button data-export-vouchers>Export CSV</button><button data-print>Print</button>"#,
         )
         .0;
         assert!(html.contains("aria-current=\"page\">Issue coupon"));
         assert!(html.contains("class=\"header-logout\""));
         assert!(html.contains("data-print"));
+        assert!(html.contains("data-export-vouchers"));
         assert!(!html.contains("onclick="));
     }
 

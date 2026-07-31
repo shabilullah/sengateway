@@ -89,6 +89,25 @@
     button.addEventListener('click', () => window.print());
   });
 
+  document.querySelectorAll('[data-export-vouchers]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const quote = (value) => `"${value.replaceAll('"', '""')}"`;
+      const rows = [...document.querySelectorAll('[data-voucher]')].map((voucher) => [
+        voucher.querySelector('h2').textContent.trim(),
+        voucher.querySelector('.code').textContent.trim(),
+        voucher.querySelector('p:last-child').textContent.trim(),
+      ]);
+      const csv = [['Template', 'Code', 'Policy'], ...rows]
+        .map((row) => row.map(quote).join(','))
+        .join('\r\n');
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(new Blob(['\uFEFF', csv], { type: 'text/csv;charset=utf-8' }));
+      link.download = 'vouchers.csv';
+      link.click();
+      URL.revokeObjectURL(link.href);
+    });
+  });
+
   const search = document.querySelector('[data-template-search]');
   if (search) {
     const cards = [...document.querySelectorAll('[data-template-card]')];
