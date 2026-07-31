@@ -12,6 +12,7 @@ services:
       TRUSTED_PROXY_IP: 172.28.0.3
       SETUP: ${SETUP:?Set SETUP true or false}
       SETUP_PASSCODE: ${SETUP_PASSCODE:?Set setup passcode with at least 16 bytes}
+      CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN:?Set restricted Cloudflare DNS token}
       RUST_LOG: sengateway=info
     volumes:
       - app-data:/data

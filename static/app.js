@@ -105,6 +105,113 @@
     });
   }
 
+  const setupForm = document.querySelector('[data-setup-form]');
+  if (setupForm) {
+    const submitButton = setupForm.querySelector('[data-setup-submit]');
+    const providerButton = setupForm.querySelector('[data-provider-verify]');
+    const providerStatus = setupForm.querySelector('[data-provider-status]');
+    const unifiButton = setupForm.querySelector('[data-unifi-verify]');
+    const unifiStatus = setupForm.querySelector('[data-unifi-status]');
+    const providerFields = [
+      'passcode',
+      'google_auth_client_id',
+      'google_oauth_client_secret'
+    ].map((name) => setupForm.elements.namedItem(name));
+    const unifiFields = [
+      'passcode',
+      'unifi_network_api_url',
+      'unifi_api_key',
+      'unifi_site_id',
+      'trust_unifi_self_signed_certificate'
+    ].map((name) => setupForm.elements.namedItem(name));
+    let providersVerified = false;
+    let unifiVerified = false;
+
+    const updateSubmit = () => {
+      submitButton.disabled = !providersVerified || !unifiVerified;
+    };
+    const resetProviders = () => {
+      providersVerified = false;
+      providerStatus.className = 'verify-status';
+      providerStatus.textContent = 'Credentials not tested.';
+      updateSubmit();
+    };
+    const resetUnifi = () => {
+      unifiVerified = false;
+      unifiStatus.className = 'verify-status';
+      unifiStatus.textContent = 'Connection not tested.';
+      updateSubmit();
+    };
+    providerFields.forEach((field) => field.addEventListener('input', resetProviders));
+    providerFields.forEach((field) => field.addEventListener('change', resetProviders));
+    unifiFields.forEach((field) => field.addEventListener('input', resetUnifi));
+    unifiFields.forEach((field) => field.addEventListener('change', resetUnifi));
+
+    const verify = async (button, status, fields, url, pending, failed, success) => {
+      const missing = fields.filter((field) => field.type !== 'checkbox')
+        .find((field) => !field.value.trim());
+      if (missing) {
+        missing.reportValidity();
+        missing.focus();
+        return false;
+      }
+      button.disabled = true;
+      status.className = 'verify-status pending';
+      status.textContent = pending;
+      const body = new URLSearchParams();
+      fields.forEach((field) => {
+        if (field.type !== 'checkbox' || field.checked) body.set(field.name, field.value);
+      });
+      try {
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+          body
+        });
+        const message = await response.text();
+        if (!response.ok) throw new Error(message || failed);
+        status.className = 'verify-status success';
+        status.textContent = message;
+        success();
+        updateSubmit();
+        return true;
+      } catch (error) {
+        status.className = 'verify-status error';
+        status.textContent = error.message;
+        return false;
+      } finally {
+        button.disabled = false;
+      }
+    };
+
+    providerButton.addEventListener('click', () => {
+      providersVerified = false;
+      updateSubmit();
+      verify(
+        providerButton,
+        providerStatus,
+        providerFields,
+        '/setup/verify-providers',
+        'Testing Google and Cloudflare credentials…',
+        'Provider verification failed',
+        () => { providersVerified = true; }
+      );
+    });
+    unifiButton.addEventListener('click', () => {
+      unifiVerified = false;
+      updateSubmit();
+      verify(
+        unifiButton,
+        unifiStatus,
+        unifiFields,
+        '/setup/verify-unifi',
+        'Testing controller connection…',
+        'UniFi verification failed',
+        () => { unifiVerified = true; }
+      );
+    });
+
+  }
   document.querySelectorAll('time[data-unix]').forEach((el) => {
     const value = Number(el.dataset.unix) * 1000;
     if (Number.isFinite(value)) el.textContent = new Date(value).toLocaleString();

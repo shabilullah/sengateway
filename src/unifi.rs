@@ -159,21 +159,44 @@ impl UnifiClient {
     }
     pub async fn resolve_mac(&self, mac: &str) -> Result<ClientRecord, UnifiError> {
         let filter = format!("macAddress.eq('{}')", mac.to_ascii_lowercase());
-        let r = self
-            .request(
-                reqwest::Method::GET,
-                format!("{}/sites/{}/clients", self.base, self.site),
-            )
-            .query(&[("filter", filter)])
-            .send()
-            .await
-            .map_err(|_| UnifiError::Request)?;
-        let r = self.accept(r).await?;
-        let page: Page = r.json().await.map_err(|_| UnifiError::Request)?;
-        page.data
-            .into_iter()
-            .find(|c| c.mac_address.eq_ignore_ascii_case(mac))
-            .ok_or(UnifiError::NotFound)
+        let mut delay = Duration::from_millis(500);
+        for attempt in 0..4 {
+            let result = async {
+                let r = self
+                    .request(
+                        reqwest::Method::GET,
+                        format!("{}/sites/{}/clients", self.base, self.site),
+                    )
+                    .query(&[("filter", &filter)])
+                    .send()
+                    .await
+                    .map_err(|_| UnifiError::Request)?;
+                let r = self.accept(r).await?;
+                let page: Page = r.json().await.map_err(|_| UnifiError::Request)?;
+                page.data
+                    .into_iter()
+                    .find(|c| c.mac_address.eq_ignore_ascii_case(mac))
+                    .ok_or(UnifiError::NotFound)
+            }
+            .await;
+            match result {
+                Ok(client) => return Ok(client),
+                Err(error)
+                    if attempt < 3
+                        && (matches!(
+                            error,
+                            UnifiError::Request
+                                | UnifiError::NotFound
+                                | UnifiError::Http(StatusCode::TOO_MANY_REQUESTS)
+                        ) || matches!(&error, UnifiError::Http(status) if status.is_server_error())) =>
+                {
+                    tokio::time::sleep(delay).await;
+                    delay *= 2;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        unreachable!()
     }
     pub async fn authorize(&self, id: &str, minutes: Option<i64>) -> Result<(), UnifiError> {
         if minutes.is_some_and(|value| value < 1) {
@@ -281,6 +304,38 @@ mod tests {
                     "access": {"authorized": false}
                 }]
             })))
+            .mount(&server)
+            .await;
+        let client =
+            UnifiClient::new(server.uri(), "site".into(), SecretString::from("key"), None).unwrap();
+
+        assert_eq!(
+            client.resolve_mac("76:6A:09:73:5C:88").await.unwrap().id,
+            "client"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_mac_retries_transient_controller_failure() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let server = MockServer::start().await;
+        let attempts = Arc::new(AtomicUsize::new(0));
+        Mock::given(method("GET"))
+            .and(path("/sites/site/clients"))
+            .respond_with(move |_: &wiremock::Request| {
+                if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                    ResponseTemplate::new(503)
+                } else {
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "data": [{
+                            "id": "client",
+                            "macAddress": "76:6a:09:73:5c:88"
+                        }]
+                    }))
+                }
+            })
+            .expect(2)
             .mount(&server)
             .await;
         let client =
