@@ -1,14 +1,10 @@
 use reqwest::{Client, StatusCode};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
-use std::{
-    env, fs,
-    process::{Command, Stdio},
-    sync::Arc,
-    time::Duration,
-};
+use std::{env, fs, process::Stdio, sync::Arc, time::Duration};
 use thiserror::Error;
 use time::OffsetDateTime;
+use tokio::process::Command;
 use tokio::sync::RwLock;
 
 #[derive(Clone)]
@@ -60,6 +56,10 @@ struct Action<'a> {
 pub enum UnifiError {
     #[error("UniFi request failed")]
     Request,
+    #[error("UniFi request timed out")]
+    Timeout,
+    #[error("UniFi connection failed")]
+    Connect,
     #[error("UniFi returned HTTP {0}")]
     Http(StatusCode),
     #[error("client is not known to UniFi")]
@@ -73,7 +73,10 @@ impl UnifiClient {
         key: SecretString,
         pinned_certificate_pem: Option<&[u8]>,
     ) -> Result<Self, UnifiError> {
-        let mut builder = Client::builder().timeout(Duration::from_secs(10));
+        let mut builder = Client::builder()
+            .timeout(Duration::from_secs(10))
+            .tls_built_in_webpki_certs(false)
+            .tls_built_in_native_certs(true);
         let configured = env::var_os("UNIFI_CA_CERT_PATH")
             .map(fs::read)
             .transpose()
@@ -92,17 +95,16 @@ impl UnifiClient {
             last_success: Arc::new(RwLock::new(None)),
         })
     }
-    pub fn capture_certificate(base: &str) -> Result<Vec<u8>, UnifiError> {
+    pub async fn capture_certificate(base: &str) -> Result<Vec<u8>, UnifiError> {
         let url = reqwest::Url::parse(base).map_err(|_| UnifiError::Request)?;
         if url.scheme() != "https" {
             return Err(UnifiError::Request);
         }
         let host = url.host_str().ok_or(UnifiError::Request)?;
         let port = url.port_or_known_default().ok_or(UnifiError::Request)?;
-        let output = Command::new("timeout")
+        let mut command = Command::new("openssl");
+        command
             .args([
-                "12s",
-                "openssl",
                 "s_client",
                 "-connect",
                 &format!("{host}:{port}"),
@@ -111,7 +113,10 @@ impl UnifiClient {
                 "-showcerts",
             ])
             .stdin(Stdio::null())
-            .output()
+            .kill_on_drop(true);
+        let output = tokio::time::timeout(Duration::from_secs(12), command.output())
+            .await
+            .map_err(|_| UnifiError::Request)?
             .map_err(|_| UnifiError::Request)?;
         let stdout = String::from_utf8(output.stdout).map_err(|_| UnifiError::Request)?;
         let begin = stdout
@@ -122,6 +127,15 @@ impl UnifiClient {
             .ok_or(UnifiError::Request)?;
         let end = begin + relative_end + "-----END CERTIFICATE-----".len();
         Ok(format!("{}\n", &stdout[begin..end]).into_bytes())
+    }
+    fn transport(error: reqwest::Error) -> UnifiError {
+        if error.is_timeout() {
+            UnifiError::Timeout
+        } else if error.is_connect() {
+            UnifiError::Connect
+        } else {
+            UnifiError::Request
+        }
     }
 
     fn request(&self, method: reqwest::Method, url: String) -> reqwest::RequestBuilder {
@@ -138,7 +152,7 @@ impl UnifiClient {
                 .query(&[("offset", sites.len()), ("limit", LIMIT)])
                 .send()
                 .await
-                .map_err(|_| UnifiError::Request)?;
+                .map_err(Self::transport)?;
             let page: SitesPage = self
                 .accept(r)
                 .await?
@@ -170,7 +184,7 @@ impl UnifiClient {
             .query(&[("pageSize", "1")])
             .send()
             .await
-            .map_err(|_| UnifiError::Request)?;
+            .map_err(Self::transport)?;
         self.accept(r).await.map(|_| ())
     }
     pub async fn resolve_mac(&self, mac: &str) -> Result<ClientRecord, UnifiError> {
@@ -186,7 +200,7 @@ impl UnifiClient {
                     .query(&[("filter", &filter)])
                     .send()
                     .await
-                    .map_err(|_| UnifiError::Request)?;
+                    .map_err(Self::transport)?;
                 let r = self.accept(r).await?;
                 let page: Page = r.json().await.map_err(|_| UnifiError::Request)?;
                 page.data
@@ -257,7 +271,7 @@ impl UnifiClient {
             )
             .send()
             .await
-            .map_err(|_| UnifiError::Request)?;
+            .map_err(Self::transport)?;
         self.accept(r)
             .await?
             .json()
@@ -273,7 +287,7 @@ impl UnifiClient {
             .json(&body)
             .send()
             .await
-            .map_err(|_| UnifiError::Request)?;
+            .map_err(Self::transport)?;
         self.accept(r).await.map(|_| ())
     }
     async fn accept(&self, r: reqwest::Response) -> Result<reqwest::Response, UnifiError> {

@@ -395,7 +395,8 @@ async fn setup_post(
     let unifi_certificate = unifi_certificate(
         &f.unifi_network_api_url,
         f.trust_unifi_self_signed_certificate,
-    )?;
+    )
+    .await?;
     let (gc, gn) = crypto::encrypt(
         &s.config.encryption_key,
         &SecretString::from(f.google_oauth_client_secret),
@@ -710,7 +711,7 @@ async fn discover_unifi_sites(
         return Err((StatusCode::BAD_REQUEST, "UniFi API key is required"));
     }
     let api_url = unifi_api_url(controller_url)?;
-    let certificate = unifi_certificate(controller_url, trust_self_signed)?;
+    let certificate = unifi_certificate(controller_url, trust_self_signed).await?;
     let probe = unifi::UnifiClient::new(
         api_url,
         String::new(),
@@ -736,7 +737,7 @@ async fn verify_unifi_api(
     controller_url: &str,
 ) -> Result<(), (StatusCode, &'static str)> {
     validate_unifi_credentials(api_key, site_id)?;
-    let certificate = unifi_certificate(controller_url, trust_self_signed)?;
+    let certificate = unifi_certificate(controller_url, trust_self_signed).await?;
     let probe = unifi::UnifiClient::new(
         api_url.into(),
         site_id.into(),
@@ -747,16 +748,22 @@ async fn verify_unifi_api(
     probe.site_check().await.map_err(unifi_setup_error)
 }
 
-fn unifi_certificate(
+async fn unifi_certificate(
     controller_url: &str,
     trust_self_signed: bool,
 ) -> Result<Option<Vec<u8>>, (StatusCode, &'static str)> {
-    trust_self_signed
-        .then(|| {
-            unifi::UnifiClient::capture_certificate(controller_url)
-                .map_err(|_| (StatusCode::BAD_REQUEST, "cannot read UniFi TLS certificate"))
+    if !trust_self_signed {
+        return Ok(None);
+    }
+    unifi::UnifiClient::capture_certificate(controller_url)
+        .await
+        .map(Some)
+        .map_err(|_| {
+            (
+                StatusCode::BAD_GATEWAY,
+                "Could not capture UniFi TLS certificate",
+            )
         })
-        .transpose()
 }
 
 fn unifi_api_url(controller_url: &str) -> Result<String, (StatusCode, &'static str)> {
@@ -813,9 +820,14 @@ fn unifi_setup_error(error: unifi::UnifiError) -> (StatusCode, &'static str) {
             StatusCode::BAD_GATEWAY,
             "UniFi API returned an unexpected response",
         ),
+        unifi::UnifiError::Timeout => (StatusCode::GATEWAY_TIMEOUT, "UniFi connection timed out"),
+        unifi::UnifiError::Connect => (
+            StatusCode::BAD_GATEWAY,
+            "Could not establish a trusted TLS connection to UniFi",
+        ),
         unifi::UnifiError::Request => (
             StatusCode::BAD_GATEWAY,
-            "Could not connect securely to UniFi",
+            "UniFi returned an unreadable response",
         ),
         unifi::UnifiError::NotFound => (StatusCode::BAD_GATEWAY, "UniFi site was not found"),
     }
@@ -1040,6 +1052,21 @@ mod tests {
             assert_eq!(count, 0, "{table} was not reset");
         }
     }
+    #[test]
+    fn unifi_transport_errors_are_actionable() {
+        assert_eq!(
+            unifi_setup_error(unifi::UnifiError::Timeout),
+            (StatusCode::GATEWAY_TIMEOUT, "UniFi connection timed out")
+        );
+        assert_eq!(
+            unifi_setup_error(unifi::UnifiError::Connect),
+            (
+                StatusCode::BAD_GATEWAY,
+                "Could not establish a trusted TLS connection to UniFi"
+            )
+        );
+    }
+
     #[test]
     fn google_response_must_confirm_credentials() {
         assert!(google_credentials_accepted("invalid_grant"));
